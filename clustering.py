@@ -71,6 +71,17 @@ def preprocess_features(npdata, pca=256):
     npdata = npdata / row_sums[:, np.newaxis]
 
     return npdata
+
+def learn_metric(X, y):
+    from metric_learn import LMNN
+
+    lmnn = LMNN(k=3, max_iter=10)
+    lmnn.fit(X, y)
+
+    # X_transformed = lmnn.transform(X)
+    W = lmnn.transformer_weight_
+
+    return W
     
 
 def run_kmeans(x, args):

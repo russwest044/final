@@ -93,6 +93,8 @@ def main(args):
         'degree_input': True
     }
     model = dmc(gnn_args)
+    transformer = torch.eye(args.hidden_size, requires_grad=False)
+    
 
     # build optimizer
     if args.optimizer == "sgd":
@@ -129,30 +131,33 @@ def main(args):
                         'centroids': torch.zeros(int(args.num_clusters), args.low_dim).cuda(), # (k, d)
                         'density': torch.zeros(int(args.num_clusters)).cuda() # (k, )
                         }
-        # run k-means
+        
+        # get features from frozen encoder
         features = clustering.compute_features(eval_loader, model, args)
+        # projection
+        features = torch.mm(transformer, features)
+
+        # Kmeans
         cluster_result = clustering.run_kmeans(features, args)
         nd_lists = [[] for i in range(args.num_clusters)] # (k, N_k)
         for i in range(len(eval_dataset)):
             nd_lists[cluster_result['nd2cluster'][i]].append(i) # (k, N_k)
         # get centroids and precision
         centroids = cluster_result['centroids'] # (k, d)
-        precision = clustering.sample_estimator(nd_lists, features, centroids, args)
+        # precision = clustering.sample_estimator(nd_lists, features, centroids, args)
         # add centroids and precision to model
         centroids = torch.tensor(centroids, dtype=torch.float).cuda()
-        precision = torch.tensor(precision, dtype=torch.float).cuda()
-        model.clusteringlayer.cluster_centers = torch.nn.Parameter(centroids)
-        model.clusteringlayer.precision = torch.nn.Parameter(precision)
+        model.centroids = centroids
+        W = clustering.learn_metric(features, cluster_result['nd2cluster'])
+        model.transformer = W*transformer
+        # # precision = torch.tensor(precision, dtype=torch.float).cuda()
+        # model.clusteringlayer.precision = torch.nn.Parameter(precision)
 
         # assign pseudolabels
         # train_dataset = clustering.cluster_assign(nd_lists, dataset.imgs)
-
-        # uniformly sample per target
-        # sampler = UnifLabelSampler(int(args.reassign * len(train_dataset)),
-        #                            deepcluster.images_lists)
         
         # train for one epoch
-        train(train_loader, model, optimizer, epoch, args, cluster_result)
+        train(train_loader, model, optimizer, epoch, args, device)
         # save model
         torch.save(model.state_dict(), './pretrained/{}.pkl'.format(args.dataset))
         end_time = time.time()
@@ -172,7 +177,7 @@ def main(args):
     test_anomaly(test_loader, model, device)
 
 
-def train(train_loader, model, optimizer, epoch, args, cluster_result, device):
+def train(train_loader, model, optimizer, epoch, args, device):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     learning_rates = AverageMeter('LR', ':.4e')
@@ -195,17 +200,18 @@ def train(train_loader, model, optimizer, epoch, args, cluster_result, device):
         lr = adjust_learning_rate(optimizer, epoch + i / iters_per_epoch, args)
         learning_rates.update(lr)
 
-        graph_q, graph_k = batch
-        target = idx
+        # graph_q, graph_k = batch
+        graph_q = batch
 
         graph_q = graph_q.to(device)
-        graph_k = graph_k.to(device)
-        target = target.to(device)
+        # graph_k = graph_k.to(device)
+        idx = idx.to(device)
 
         bsz = graph_q.batch_size
 
         # model forward
-        loss = model(graph_q, graph_k)
+        # loss = model(graph_q, graph_k)
+        loss = model(graph_q, idx)
         losses.update(loss.item(), bsz)
         # compute gradient and do SGD step
         optimizer.zero_grad()
