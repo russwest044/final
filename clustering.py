@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import faiss
 import tqdm
-from dataset import ReassignedDataset
+# from dataset import ReassignedDataset
 
 
 def sample_estimator(nd_lists, features, centroids, args):
@@ -155,21 +155,21 @@ def run_kmeans(x, args):
         
     return results
 
-def cluster_assign(nd_lists, dataset):
-    """Creates a dataset from clustering, with clusters as labels.
-    Args:
-        images_lists (list of list): for each cluster, the list of image indexes
-                                    belonging to this cluster
-        dataset (list): initial dataset
-    Returns:
-        ReassignedDataset(torch.utils.data.Dataset): a dataset with clusters as
-                                                     labels
-    """
-    assert nd_lists is not None
-    pseudolabels = []
-    nd_indices = []
-    for cluster, nodes in enumerate(nd_lists): # (k, N_k)
-        nd_indices.extend(nodes)
-        pseudolabels.extend([cluster] * len(nodes))
+# def cluster_assign(nd_lists, dataset):
+#     """Creates a dataset from clustering, with clusters as labels.
+#     Args:
+#         images_lists (list of list): for each cluster, the list of image indexes
+#                                     belonging to this cluster
+#         dataset (list): initial dataset
+#     Returns:
+#         ReassignedDataset(torch.utils.data.Dataset): a dataset with clusters as
+#                                                      labels
+#     """
+#     assert nd_lists is not None
+#     pseudolabels = []
+#     nd_indices = []
+#     for cluster, nodes in enumerate(nd_lists): # (k, N_k)
+#         nd_indices.extend(nodes)
+#         pseudolabels.extend([cluster] * len(nodes))
 
-    return ReassignedDataset(nd_indices, pseudolabels, dataset)
+#     return ReassignedDataset(nd_indices, pseudolabels, dataset)

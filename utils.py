@@ -13,6 +13,23 @@ import networkx as nx
 # from models import GCN
 # from seeds import val_seeds, test_seeds
 
+def batcher():
+    def batcher_dev(batch):
+        graph_q, graph_k = zip(*batch)
+        graph_q, graph_k = dgl.batch(graph_q), dgl.batch(graph_k)
+        return graph_q, graph_k
+
+    return batcher_dev
+
+
+def labeled_batcher():
+    def batcher_dev(batch):
+        graph_q, label = zip(*batch)
+        graph_q = dgl.batch(graph_q)
+        return graph_q, torch.LongTensor(label)
+
+    return batcher_dev
+
 def load(dataset, train_rate=0.3, val_rate=0.1):
     """Load data."""
     data = sio.loadmat("./data/{}.mat".format(dataset))
@@ -27,7 +44,7 @@ def load(dataset, train_rate=0.3, val_rate=0.1):
     num_classes = np.max(labels) + 1
     labels = dense_to_one_hot(labels, num_classes)
 
-    ano_labels = np.squeeze(np.array(label))
+    # ano_labels = np.squeeze(np.array(label))
     # if 'str_anomaly_label' in data:
     #     str_ano_labels = np.squeeze(np.array(data['str_anomaly_label']))
     #     attr_ano_labels = np.squeeze(np.array(data['attr_anomaly_label']))
@@ -35,16 +52,16 @@ def load(dataset, train_rate=0.3, val_rate=0.1):
     #     str_ano_labels = None
     #     attr_ano_labels = None
 
-    num_node = adj.shape[0]
-    num_train = int(num_node * train_rate)
-    num_val = int(num_node * val_rate)
-    all_idx = list(range(num_node))
-    random.shuffle(all_idx)
-    idx_train = all_idx[: num_train]
-    idx_val = all_idx[num_train: num_train + num_val]
-    idx_test = all_idx[num_train + num_val:]
+    # num_node = adj.shape[0]
+    # num_train = int(num_node * train_rate)
+    # num_val = int(num_node * val_rate)
+    # all_idx = list(range(num_node))
+    # random.shuffle(all_idx)
+    # idx_train = all_idx[: num_train]
+    # idx_val = all_idx[num_train: num_train + num_val]
+    # idx_test = all_idx[num_train + num_val:]
     # return adj, feat, labels, idx_train, idx_val, idx_test, ano_labels, str_ano_labels, attr_ano_labels
-    return adj, feat, labels, idx_train, idx_val, idx_test, ano_labels
+    return adj, feat, labels
 
 def create_dgl_graph(adj):
     """Translate data into DGLGraph."""
@@ -190,9 +207,7 @@ def gdc(A: sp.csr_matrix, alpha: float, eps: float):
 
 #     return subv
 
-def generate_rwr_subgraph(
-    g, seed, trace, features, positional_embedding_size, entire_graph=False
-):
+def generate_rwr_subgraph(g, seed, trace, features, entire_graph=False):
     subv = torch.unique(torch.cat(trace)).tolist()
     try:
         subv.remove(seed)
@@ -203,10 +218,8 @@ def generate_rwr_subgraph(
         subg = g.subgraph(g.nodes())
     else:
         subg = g.subgraph(subv)
-
-    # subg = _add_undirected_graph_positional_embedding(subg, positional_embedding_size)
-    # subg = _add_masked_node_embedding(subg, features)
-    n_feat = features[g.nodes()]
+    
+    n_feat = features[subv]
     subg.ndata["features"] = n_feat
 
     subg.ndata["seed"] = torch.zeros(subg.number_of_nodes(), dtype=torch.long)
@@ -215,79 +228,3 @@ def generate_rwr_subgraph(
     else:
         subg.ndata["seed"][0] = 1
     return subg
-
-# def _add_masked_node_embedding(g, features):
-#     b = g.number_of_nodes()
-#     n_feat = features[g.nodes()][1:]
-#     added_feat_zero_row = torch.zeros((b, n_feat.shape[1]), dtype=torch.long)
-#     n_feat = torch.cat((added_feat_zero_row, n_feat), dim=-2)
-#     g.ndata["features"] = n_feat
-#     return g
-# def run_kmeans(x, args):
-#     """
-#     Args:
-#         x: data to be clustered
-#     """
-    
-#     print('performing kmeans clustering')
-#     results = {'im2cluster':[],'centroids':[],'density':[]}
-    
-#     for seed, num_cluster in enumerate(args.num_cluster):
-#         # intialize faiss clustering parameters
-#         d = x.shape[1]
-#         k = int(num_cluster)
-#         clus = faiss.Clustering(d, k)
-#         clus.verbose = True
-#         clus.niter = 20
-#         clus.nredo = 5
-#         clus.seed = seed
-#         clus.max_points_per_centroid = 1000
-#         clus.min_points_per_centroid = 10
-
-#         res = faiss.StandardGpuResources()
-#         cfg = faiss.GpuIndexFlatConfig()
-#         cfg.useFloat16 = False
-#         cfg.device = args.gpu    
-#         index = faiss.GpuIndexFlatL2(res, d, cfg)  
-
-#         clus.train(x, index)   
-
-#         D, I = index.search(x, 1) # for each sample, find cluster distance and assignments
-#         im2cluster = [int(n[0]) for n in I]
-        
-#         # get cluster centroids
-#         centroids = faiss.vector_to_array(clus.centroids).reshape(k,d)
-        
-#         # sample-to-centroid distances for each cluster 
-#         Dcluster = [[] for c in range(k)]          
-#         for im,i in enumerate(im2cluster):
-#             Dcluster[i].append(D[im][0])
-        
-#         # concentration estimation (phi)        
-#         density = np.zeros(k)
-#         for i,dist in enumerate(Dcluster):
-#             if len(dist)>1:
-#                 d = (np.asarray(dist)**0.5).mean()/np.log(len(dist)+10)            
-#                 density[i] = d     
-                
-#         #if cluster only has one point, use the max to estimate its concentration        
-#         dmax = density.max()
-#         for i,dist in enumerate(Dcluster):
-#             if len(dist)<=1:
-#                 density[i] = dmax 
-
-#         density = density.clip(np.percentile(density,10),np.percentile(density,90)) #clamp extreme values for stability
-#         density = args.temperature*density/density.mean()  #scale the mean to temperature 
-        
-#         # convert to cuda Tensors for broadcast
-#         centroids = torch.Tensor(centroids).cuda()
-#         centroids = nn.functional.normalize(centroids, p=2, dim=1)    
-
-#         im2cluster = torch.LongTensor(im2cluster).cuda()               
-#         density = torch.Tensor(density).cuda()
-        
-#         results['centroids'].append(centroids)
-#         results['density'].append(density)
-#         results['im2cluster'].append(im2cluster)    
-        
-#     return results

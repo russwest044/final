@@ -210,7 +210,7 @@ class DMC_v1(nn.Module):
 # 		return loss
 
 
-# def dmc(**kwargs):
-#     base_encoder = GraphEncoder(**kwargs)
-#     model = DMC(base_encoder)
-#     return model
+def model1(**kwargs):
+    base_encoder = GraphEncoder(**kwargs)
+    model = DMC_v1(base_encoder)
+    return model

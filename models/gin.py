@@ -207,6 +207,10 @@ class UnsupervisedGIN(nn.Module):
         self.target_node = target_node
 
     def forward(self, g, h, efeat):
+        """
+        g: DGLGraph()
+        h: nfeat
+        """
         # list of hidden representation at each layer (including input)
         if self.target_node:
             for i in range(self.num_layers - 1):

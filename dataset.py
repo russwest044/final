@@ -4,7 +4,7 @@ import dgl
 import dgl.data
 import numpy as np
 import torch.utils.data
-from .utils import *
+from utils import *
 
 
 class GraphDataset(torch.utils.data.Dataset):
@@ -15,7 +15,6 @@ class GraphDataset(torch.utils.data.Dataset):
         rw_hops=64,
         subgraph_size=64,
         restart_prob=0.8,
-        # positional_embedding_size=32,
         step_dist=[1.0, 0.0, 0.0],
         aug=None,
     ):
@@ -23,7 +22,6 @@ class GraphDataset(torch.utils.data.Dataset):
         self.rw_hops = rw_hops
         self.subgraph_size = subgraph_size
         self.restart_prob = restart_prob
-        # self.positional_embedding_size = positional_embedding_size
         self.step_dist = step_dist
         assert sum(step_dist) == 1.0
         # assert positional_embedding_size > 1
@@ -36,7 +34,7 @@ class GraphDataset(torch.utils.data.Dataset):
             self.g_aug = create_dgl_graph(self._graph_data_argumentation(adj))
         else:
             self.g_aug = None
-        self.length = self.g_origin.number_of_nodes()
+        self.length = self.g.number_of_nodes()
 
     def _graph_data_argumentation(self, adj):
         """ Graph data argumentation """
@@ -85,9 +83,8 @@ class GraphDataset(torch.utils.data.Dataset):
         graph_q = generate_rwr_subgraph(
             g=self.g,
             seed=node_idx,
-            trace=trace,
+            trace=trace[0],
             features=self.features
-            # positional_embedding_size=self.positional_embedding_size,
         )
 
         if self.g_aug:
@@ -103,7 +100,6 @@ class GraphDataset(torch.utils.data.Dataset):
                 seed=other_node_idx,
                 trace=trace_aug,
                 features=self.features
-                # positional_embedding_size=self.positional_embedding_size,
             )
 
             return (graph_q, graph_k), idx

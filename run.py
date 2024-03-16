@@ -1,3 +1,4 @@
+import os
 import math
 import dgl
 import time
@@ -6,17 +7,14 @@ import numpy as np
 import random
 import warnings
 import argparse
-# from functools import partial
-from .utils import *
+from utils import *
 import clustering
-from .dataset import GraphDataset
-from dmc import dmc
+from dataset import GraphDataset
+from model import model1
 from sklearn.metrics import roc_auc_score
 
 # from torch.utils.tensorboard import SummaryWriter
-
-parser = argparse.ArgumentParser(description='')
-args = parser.parse_args()
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 
 def main(args):
@@ -41,13 +39,18 @@ def main(args):
 
     # data preprocess
     adj, features, labels = load(args.dataset)
+    adj = adj.todense()
     features = preprocess_features(features)
-    features = torch.FloatTensor(features[np.newaxis]).to(device)
-    adj = torch.FloatTensor(adj[np.newaxis]).to(device)
-    labels = torch.FloatTensor(labels[np.newaxis]).to(device)
-    
+    features = torch.FloatTensor(features)
+    # adj = torch.FloatTensor(adj)
+    labels = torch.FloatTensor(labels)
+
+    nb_nodes = features.shape[0]
+    ft_size = features.shape[1]
+
     # build dataset
-    train_dataset = GraphDataset(adj=adj, features=features, aug=args.augmentation)
+    # train_dataset = GraphDataset(adj=adj, features=features, aug=args.augmentation)
+    train_dataset = GraphDataset(adj=adj, features=features, aug=None)
     eval_dataset = GraphDataset(adj=adj, features=features, aug=None)
 
     if args.sampler:
@@ -58,7 +61,9 @@ def main(args):
     train_loader = torch.utils.data.DataLoader(
         dataset=train_dataset,
         batch_size=args.batch_size,
-        shuffle=(train_sampler is None),
+        # TODO:
+        collate_fn=labeled_batcher(),
+        shuffle=True,
         num_workers=args.workers,
         pin_memory=True,
         sampler=train_sampler,
@@ -68,6 +73,7 @@ def main(args):
     eval_loader = torch.utils.data.DataLoader(
         dataset=eval_dataset,
         batch_size=args.batch_size,
+        collate_fn=labeled_batcher(),
         shuffle=False,
         num_workers=args.workers,
         pin_memory=True,
@@ -76,25 +82,12 @@ def main(args):
 
     # build model
     gnn_args = {
-        'positional_embedding_size': args.positional_embedding_size,
-        'max_node_freq': args.max_node_freq,
-        'max_edge_freq': args.max_edge_freq,
-        'max_degree': args.max_degree,
-        'freq_embedding_size': args.freq_embedding_size,
-        'degree_embedding_size': args.degree_embedding_size,
-        'output_dim': args.hidden_size,
-        'node_hidden_dim': args.hidden_size,
-        'edge_hidden_dim': args.hidden_size,
-        'num_layers': args.num_layer,
-        'num_step_set2set': args.set2set_iter,
-        'num_layer_set2set': args.set2set_lstm_layer,
-        'norm': args.norm,
-        'gnn_model': args.model,
-        'degree_input': True
+        'ft_size': ft_size,
+        'output_dim': args.embedding_dim,
+        'gnn_model': args.model
     }
-    model = dmc(gnn_args)
-    transformer = torch.eye(args.hidden_size, requires_grad=False)
-    
+    model = model1(gnn_args)
+    transformer = torch.eye(args.embedding_dim, requires_grad=False)
 
     # build optimizer
     if args.optimizer == "sgd":
@@ -108,14 +101,12 @@ def main(args):
         optimizer = torch.optim.Adam(
             model.parameters(),
             lr=args.learning_rate,
-            betas=(args.beta1, args.beta2),
             weight_decay=args.weight_decay,
         )
     elif args.optimizer == "adagrad":
         optimizer = torch.optim.Adagrad(
             model.parameters(),
             lr=args.learning_rate,
-            lr_decay=args.lr_decay_rate,
             weight_decay=args.weight_decay,
         )
     else:
@@ -127,11 +118,15 @@ def main(args):
         start_time = time.time()
 
         # placeholder for clustering result
-        cluster_result = {'nd2cluster': torch.zeros(len(eval_dataset), dtype=torch.long).cuda(), # (N, )
-                        'centroids': torch.zeros(int(args.num_clusters), args.low_dim).cuda(), # (k, d)
-                        'density': torch.zeros(int(args.num_clusters)).cuda() # (k, )
-                        }
-        
+        cluster_result = {
+            # (N, )
+            'nd2cluster': torch.zeros(len(eval_dataset), dtype=torch.long).cuda(), 
+            # (k, d)
+            'centroids': torch.zeros(int(args.num_clusters), args.low_dim).cuda(), 
+            # (k, )
+            'density': torch.zeros(int(args.num_clusters)).cuda()
+        }
+
         # get features from frozen encoder
         features = clustering.compute_features(eval_loader, model, args)
         # projection
@@ -139,13 +134,13 @@ def main(args):
 
         # Kmeans
         cluster_result = clustering.run_kmeans(features, args)
-        nd_lists = [[] for i in range(args.num_clusters)] # (k, N_k)
+        nd_lists = [[] for i in range(args.num_clusters)]  # (k, N_k)
         for i in range(len(eval_dataset)):
-            nd_lists[cluster_result['nd2cluster'][i]].append(i) # (k, N_k)
+            nd_lists[cluster_result['nd2cluster'][i]].append(i)  # (k, N_k)
         # get centroids and precision
-        centroids = cluster_result['centroids'] # (k, d)
+        centroids = cluster_result['centroids']  # (k, d)
         # precision = clustering.sample_estimator(nd_lists, features, centroids, args)
-        # add centroids and precision to model
+        
         centroids = torch.tensor(centroids, dtype=torch.float).cuda()
         model.centroids = centroids
         W = clustering.learn_metric(features, cluster_result['nd2cluster'])
@@ -155,18 +150,22 @@ def main(args):
 
         # assign pseudolabels
         # train_dataset = clustering.cluster_assign(nd_lists, dataset.imgs)
-        
+
         # train for one epoch
         train(train_loader, model, optimizer, epoch, args, device)
         # save model
-        torch.save(model.state_dict(), './pretrained/{}.pkl'.format(args.dataset))
+        torch.save(
+            model.state_dict(), './pretrained/{}.pkl'.format(args.dataset)
+        )
         end_time = time.time()
-        print("epoch {}, total time {:.2f}".format(epoch, end_time - start_time))
-    
+        print("epoch {}, total time {:.2f}".format(
+            epoch, end_time - start_time))
+
     # testing
     test_loader = torch.utils.data.DataLoader(
         dataset=train_dataset,
         batch_size=args.batch_size,
+        collate_fn=labeled_batcher(),
         shuffle=(train_sampler is None),
         num_workers=args.workers,
         pin_memory=True,
@@ -220,12 +219,13 @@ def train(train_loader, model, optimizer, epoch, args, device):
         # scaler.scale(loss).backward()
         # scaler.step(optimizer)
         # scaler.update()
-        
+
         batch_time.update(time.time() - end)
         end = time.time()
 
         if i % args.print_freq == 0:
             progress.display(i)
+
 
 def test_anomaly(test_loader, model, device):
     # Testing
@@ -233,7 +233,7 @@ def test_anomaly(test_loader, model, device):
     model.load_state_dict(torch.load('{}.pkl'.format(args.dataset)))
     multi_round_ano_score = []
     print('Testing AUC!', flush=True)
-    
+
     # switch to eval mode
     model.eval()
 
@@ -312,4 +312,24 @@ class ProgressMeter(object):
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='')
+    parser.add_argument('--seed', type=int, default=39)
+    parser.add_argument('--expid', type=int, default=1)
+    parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--device', type=str, default='cuda:0')
+    parser.add_argument('--dataset', type=str, default='cora')
+    parser.add_argument('--optimizer', type=int, default='sgd')
+    parser.add_argument('--learning_rate', type=float, default=1e-3)
+    parser.add_argument('--weight_decay', type=float, default=0.0)
+    parser.add_argument('--runs', type=int, default=1)
+    parser.add_argument('--embedding_dim', type=int, default=64)
+    parser.add_argument('--patience', type=int, default=100)
+    parser.add_argument('--num_epoch', type=int, default=400)
+    parser.add_argument('--batch_size', type=int, default=300)
+    parser.add_argument('--subgraph_size', type=int, default=4)
+    parser.add_argument('--readout', type=str, default='avg')
+    parser.add_argument('--auc_test_rounds', type=int, default=256)
+    parser.add_argument('--negsamp_ratio_patch', type=int, default=6)
+    parser.add_argument('--negsamp_ratio_context', type=int, default=1)
+    args = parser.parse_args()
+    main(args)
