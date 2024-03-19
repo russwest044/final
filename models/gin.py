@@ -185,8 +185,9 @@ class UnsupervisedGIN(nn.Module):
 
         # Linear function for graph poolings of output of each layer
         # which maps the output of different layers into a prediction score
+        self.projection = nn.Linear(input_dim, output_dim)
         self.linears_prediction = torch.nn.ModuleList()
-
+        
         for layer in range(num_layers):
             if layer == 0:
                 self.linears_prediction.append(nn.Linear(input_dim, output_dim))
@@ -205,20 +206,20 @@ class UnsupervisedGIN(nn.Module):
             raise NotImplementedError
         
         self.target_node = target_node
-
+    
     def forward(self, g, h, efeat):
         """
         g: DGLGraph()
         h: nfeat
         """
         # list of hidden representation at each layer (including input)
-        if self.target_node:
-            for i in range(self.num_layers - 1):
-                h = self.ginlayers[i](g, h)
-                h = self.batch_norms[i](h)
-                h = F.relu(h)
-            x = h[0]
-            return x
+        # if self.target_node:
+        #     for i in range(self.num_layers - 1):
+        #         h = self.ginlayers[i](g, h)
+        #         h = self.batch_norms[i](h)
+        #         h = F.relu(h)
+        #     x = h[0]
+        #     return x
         
         hidden_rep = [h]
 

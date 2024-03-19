@@ -6,10 +6,13 @@ import torch.nn.functional as F
 from dgl.model_zoo.chem.gnn import GCNLayer
 from dgl.nn.pytorch import AvgPooling, Set2Set
 
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = "True"
 
 class UnsupervisedGCN(nn.Module):
     def __init__(
         self,
+        node_input_dim, 
         hidden_size=64,
         num_layer=2,
         readout="avg",
@@ -21,14 +24,14 @@ class UnsupervisedGCN(nn.Module):
         self.layers = nn.ModuleList(
             [
                 GCNLayer(
-                    in_feats=hidden_size,
+                    in_feats=node_input_dim if i == 0 else hidden_size,
                     out_feats=hidden_size,
                     activation=F.relu if i + 1 < num_layer else None,
                     residual=False,
                     batchnorm=False,
                     dropout=0.0,
                 )
-                for i in range(num_layer)
+                for i in range(num_layer-1)
             ]
         )
         if readout == "avg":
@@ -60,8 +63,8 @@ class UnsupervisedGCN(nn.Module):
 
 
 if __name__ == "__main__":
-    model = UnsupervisedGCN()
-    print(model)
+    model = UnsupervisedGCN(node_input_dim=64)
+    # print(model)
     g = dgl.DGLGraph()
     g.add_nodes(3)
     g.add_edges([0, 0, 1], [1, 2, 2])

@@ -3,260 +3,291 @@ import math
 import dgl
 import time
 import torch
+import torch.nn as nn
 import numpy as np
 import random
-import warnings
 import argparse
+from tqdm import tqdm
 from utils import *
 import clustering
-from dataset import GraphDataset
-from model import model1
+from models.graph_encoder import GraphEncoder
 from sklearn.metrics import roc_auc_score
 
 # from torch.utils.tensorboard import SummaryWriter
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+parser = argparse.ArgumentParser(description='')
+parser.add_argument('--seed', type=int, default=39)
+parser.add_argument('--workers', type=int, default=4)
+parser.add_argument('--device', type=str, default='cuda:0')
+# dataset
+parser.add_argument('--dataset', type=str, default='cora')
+# model definition
+parser.add_argument("--model", type=str, default="gcn",
+                    choices=["gat", "mpnn", "gin", "gcn"])
+# num of clusters
+parser.add_argument('--nmb_prototypes', type=int, default=7)
+parser.add_argument('--num_clusters', type=int, default=7)
+# hyperparameters
+parser.add_argument('--optimizer', type=str, default='sgd')
+parser.add_argument('--sgd_momentum', type=float, default=0.9)
+parser.add_argument('--lr', type=float, default=1e-3)
+parser.add_argument('--weight_decay', type=float, default=1e-6)
+parser.add_argument('--embedding_dim', type=int, default=64)
+parser.add_argument('--epochs', type=int, default=20)
+parser.add_argument('--warmup_epochs', type=int, default=1)
+parser.add_argument('--print_freq', type=int, default=10)
+parser.add_argument('--batch_size', type=int, default=300)
 
-def main(args):
-    device = args.device
+parser.add_argument('--temperature', type=float, default=1.0)
+parser.add_argument('--subgraph_size', type=int, default=4)
+# parser.add_argument('--readout', type=str, default='avg')
+parser.add_argument('--test_rounds', type=int, default=10)
+parser.add_argument('--negsamp_ratio_patch', type=int, default=6)
+parser.add_argument('--negsamp_ratio_context', type=int, default=1)
 
-    print('Dataset: {}'.format(args.dataset), flush=True)
-    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+# ratio
+parser.add_argument('--alpha', type=float, default=0.1,
+                    help='how much the first view involves')
+parser.add_argument('--beta', type=float, default=0.1,
+                    help='how much the second view involves')
+args = parser.parse_args()
 
-    if args.seed is not None:
-        random.seed(args.seed)
-        dgl.random.seed(args.seed)
-        torch.manual_seed(args.seed)
-        torch.cuda.manual_seed(args.seed)
-        torch.cuda.manual_seed_all(args.seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        warnings.warn('You have chosen to seed training. '
-                      'This will turn on the CUDNN deterministic setting, '
-                      'which can slow down your training considerably! '
-                      'You may see unexpected behavior when restarting '
-                      'from checkpoints.')
 
-    # data preprocess
-    adj, features, labels = load(args.dataset)
-    adj = adj.todense()
-    features = preprocess_features(features)
-    features = torch.FloatTensor(features)
-    # adj = torch.FloatTensor(adj)
-    labels = torch.FloatTensor(labels)
-
-    nb_nodes = features.shape[0]
-    ft_size = features.shape[1]
-
-    # build dataset
-    # train_dataset = GraphDataset(adj=adj, features=features, aug=args.augmentation)
-    train_dataset = GraphDataset(adj=adj, features=features, aug=None)
-    eval_dataset = GraphDataset(adj=adj, features=features, aug=None)
-
-    if args.sampler:
-        train_sampler = args.sampler
-    else:
-        train_sampler = None
-
-    train_loader = torch.utils.data.DataLoader(
-        dataset=train_dataset,
-        batch_size=args.batch_size,
-        # TODO:
-        collate_fn=labeled_batcher(),
-        shuffle=True,
-        num_workers=args.workers,
-        pin_memory=True,
-        sampler=train_sampler,
-        drop_last=True
-    )
-
-    eval_loader = torch.utils.data.DataLoader(
-        dataset=eval_dataset,
-        batch_size=args.batch_size,
-        collate_fn=labeled_batcher(),
-        shuffle=False,
-        num_workers=args.workers,
-        pin_memory=True,
-        drop_last=True
-    )
-
-    # build model
-    gnn_args = {
-        'ft_size': ft_size,
-        'output_dim': args.embedding_dim,
-        'gnn_model': args.model
-    }
-    model = model1(gnn_args)
-    transformer = torch.eye(args.embedding_dim, requires_grad=False)
-
-    # build optimizer
-    if args.optimizer == "sgd":
-        optimizer = torch.optim.SGD(
-            model.parameters(),
-            lr=args.learning_rate,
-            momentum=args.momentum if args.momentum else 0.9,
-            weight_decay=args.weight_decay,
-        )
-    elif args.optimizer == "adam":
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=args.learning_rate,
-            weight_decay=args.weight_decay,
-        )
-    elif args.optimizer == "adagrad":
-        optimizer = torch.optim.Adagrad(
-            model.parameters(),
-            lr=args.learning_rate,
-            weight_decay=args.weight_decay,
-        )
-    else:
-        raise NotImplementedError
-
+def train():
     # training
-    for epoch in range(args.num_epoch):
+    for epoch in range(args.epochs):
         print("==> training...")
-        start_time = time.time()
+        # start_time = time.time()
+        subgraphs = generate_rwr_subgraph(dgl_graph, subgraph_size)
 
         # placeholder for clustering result
         cluster_result = {
             # (N, )
-            'nd2cluster': torch.zeros(len(eval_dataset), dtype=torch.long).cuda(), 
+            'nd2cluster': torch.zeros(nb_nodes, dtype=torch.long),
             # (k, d)
-            'centroids': torch.zeros(int(args.num_clusters), args.low_dim).cuda(), 
+            'centroids': torch.zeros(int(args.num_clusters), args.embedding_dim),
             # (k, )
-            'density': torch.zeros(int(args.num_clusters)).cuda()
+            # 'density': torch.zeros(int(args.num_clusters))
         }
 
         # get features from frozen encoder
-        features = clustering.compute_features(eval_loader, model, args)
+        eval_feat = compute_features(model, subgraphs, args.embedding_dim, device)
         # projection
-        features = torch.mm(transformer, features)
+        # features = torch.mm(features, transformer).numpy()
 
         # Kmeans
-        cluster_result = clustering.run_kmeans(features, args)
-        nd_lists = [[] for i in range(args.num_clusters)]  # (k, N_k)
-        for i in range(len(eval_dataset)):
-            nd_lists[cluster_result['nd2cluster'][i]].append(i)  # (k, N_k)
-        # get centroids and precision
-        centroids = cluster_result['centroids']  # (k, d)
-        # precision = clustering.sample_estimator(nd_lists, features, centroids, args)
-        
-        centroids = torch.tensor(centroids, dtype=torch.float).cuda()
-        model.centroids = centroids
-        W = clustering.learn_metric(features, cluster_result['nd2cluster'])
-        model.transformer = W*transformer
-        # # precision = torch.tensor(precision, dtype=torch.float).cuda()
-        # model.clusteringlayer.precision = torch.nn.Parameter(precision)
+        cluster_result = clustering.run_kmeans(eval_feat, args)
+        # print(np.unique(cluster_result['nd2cluster'].numpy(), return_counts=True))
 
-        # assign pseudolabels
-        # train_dataset = clustering.cluster_assign(nd_lists, dataset.imgs)
+        eval_feat = torch.FloatTensor(eval_feat).detach()
+        nd_lists = [[] for i in range(args.num_clusters)]  # (k, N_k)
+        for i in range(nb_nodes):
+            nd_lists[cluster_result['nd2cluster'][i]].append(i)  # (k, N_k)
+
+        centroids = cluster_result['centroids'].detach()
+        precision = clustering.sample_estimator(nd_lists, eval_feat, centroids, args)
+        precision = precision.detach()
 
         # train for one epoch
-        train(train_loader, model, optimizer, epoch, args, device)
-        # save model
-        torch.save(
-            model.state_dict(), './pretrained/{}.pkl'.format(args.dataset)
-        )
-        end_time = time.time()
-        print("epoch {}, total time {:.2f}".format(
-            epoch, end_time - start_time))
-
-    # testing
-    test_loader = torch.utils.data.DataLoader(
-        dataset=train_dataset,
-        batch_size=args.batch_size,
-        collate_fn=labeled_batcher(),
-        shuffle=(train_sampler is None),
-        num_workers=args.workers,
-        pin_memory=True,
-        sampler=train_sampler,
-        drop_last=True
-    )
-
-    test_anomaly(test_loader, model, device)
-
-
-def train(train_loader, model, optimizer, epoch, args, device):
-    batch_time = AverageMeter('Time', ':6.3f')
-    data_time = AverageMeter('Data', ':6.3f')
-    learning_rates = AverageMeter('LR', ':.4e')
-    losses = AverageMeter('Loss', ':.4e')
-    progress = ProgressMeter(
-        len(train_loader),
-        [batch_time, data_time, learning_rates, losses],
-        prefix="Epoch: [{}]".format(epoch))
-
-    # switch to train mode
-    model.train()
-
-    end = time.time()
-    iters_per_epoch = len(train_loader)
-    for i, (batch, idx) in enumerate(train_loader):
-        # measure data loading time
-        data_time.update(time.time() - end)
-
-        # adjust learning rate
-        lr = adjust_learning_rate(optimizer, epoch + i / iters_per_epoch, args)
-        learning_rates.update(lr)
-
-        # graph_q, graph_k = batch
-        graph_q = batch
-
-        graph_q = graph_q.to(device)
-        # graph_k = graph_k.to(device)
-        idx = idx.to(device)
-
-        bsz = graph_q.batch_size
-
-        # model forward
-        # loss = model(graph_q, graph_k)
-        loss = model(graph_q, idx)
-        losses.update(loss.item(), bsz)
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        # scaler.scale(loss).backward()
-        # scaler.step(optimizer)
-        # scaler.update()
-
-        batch_time.update(time.time() - end)
         end = time.time()
+        for batch_idx in tqdm(range(batch_num)):
+            batch_time = AverageMeter('Time', ':6.3f')
+            data_time = AverageMeter('Data', ':6.3f')
+            learning_rates = AverageMeter('LR', ':.4e')
+            losses = AverageMeter('Loss', ':.4e')
+            progress = ProgressMeter(
+                batch_num,
+                [batch_time, data_time, learning_rates, losses],
+                prefix="Epoch: [{}]".format(epoch)
+            )
 
-        if i % args.print_freq == 0:
-            progress.display(i)
+            # switch to train mode
+            model.train()
+
+            is_final_batch = (batch_idx == (batch_num - 1))
+            if not is_final_batch:
+                idx = all_idx[batch_idx *
+                              batch_size: (batch_idx + 1) * batch_size]
+            else:
+                idx = all_idx[batch_idx * batch_size:]
+
+            cur_batch_size = len(idx)
+            ba = []
+            bf = []
+
+            for i in idx:
+                cur_adj = adj[:, subgraphs[i], :][:, :, subgraphs[i]]
+                # (1, subg_size, ft_size)
+                cur_feat = features[:, subgraphs[i], :]
+                ba.append(cur_adj)
+                bf.append(cur_feat)
+
+            ba = torch.cat(ba)
+            bf = torch.cat(bf)
+
+            # adjust learning rate
+            # lr = adjust_learning_rate(optimizer, epoch + i / iters_per_epoch, args)
+            # learning_rates.update(lr)
+
+            # model forward
+            optimizer.zero_grad()
+
+            output = model(ba, bf)
+            # print(output.requires_grad_())
+            guassian_score = clustering.get_Mahalanobis_score(
+                output, args.num_clusters, centroids, precision)
+            # guassian_score.retain_grad()
+
+            loss = criterion(guassian_score, cluster_result['nd2cluster'][idx])
+
+            losses.update(loss.item(), cur_batch_size)
+            # compute gradient and do SGD step
+            loss.backward()
+            optimizer.step()
+            # scaler.scale(loss).backward()
+            # scaler.step(optimizer)
+            # scaler.update()
+
+            batch_time.update(time.time() - end)
+
+            if batch_idx % args.print_freq == 0:
+                progress.display(batch_idx)
+
+        # print("==> Metric Learning...")
+        # W = clustering.learn_metric(features, cluster_result['nd2cluster'])
+        # transformer = torch.mm(W, transformer)
+        # transformer = transformer.to(device)
+
+        # save state
+        # checkpoint = {
+        #     "model_state_dict": model.state_dict(),
+        #     "cluster_result": cluster_result,
+        #     "transformer": transformer
+        # }
+        # torch.save(checkpoint, './pretrained/{}.pth'.format(args.dataset))
+        # # torch.save(model.state_dict(), './pretrained/{}.pkl'.format(args.dataset))
+        # end_time = time.time()
+        # print("epoch {}, total time {:.2f}".format(
+        # 	epoch, end_time - start_time))
 
 
-def test_anomaly(test_loader, model, device):
-    # Testing
-    # print('Loading {}th epoch'.format(best_t), flush=True)
-    model.load_state_dict(torch.load('{}.pkl'.format(args.dataset)))
-    multi_round_ano_score = []
+def test():
     print('Testing AUC!', flush=True)
+    # print('Loading {}th epoch'.format(best_t), flush=True)
+    # checkpoint = torch.load('./pretrained/{}.pth'.format(args.dataset))
+
+    # model.load_state_dict(checkpoint["model_state_dict"])
+    # cluster_result = checkpoint["cluster_result"]
+    # transformer = checkpoint["transformer"]
+    # model.load_state_dict(torch.load('./pretrained/{}.pkl'.format(args.dataset)))
 
     # switch to eval mode
     model.eval()
 
+    subgraphs = generate_rwr_subgraph(dgl_graph, subgraph_size)
+    eval_feat = compute_features(model, subgraphs, args.embedding_dim, device)
+
+    # Kmeans
+    cluster_result = clustering.run_kmeans(eval_feat, args)
+
+    nd_lists = [[] for i in range(args.num_clusters)]  # (k, N_k)
+    for i in range(nb_nodes):
+        nd_lists[cluster_result['nd2cluster'][i]].append(i)  # (k, N_k)
+
+    eval_feat = torch.FloatTensor(eval_feat).detach()
+    centroids = cluster_result['centroids'].detach()
+    precision = clustering.sample_estimator(nd_lists, eval_feat, centroids, args)
+    precision = precision.detach()
+
+    multi_round_ano_score = np.zeros((args.test_rounds, nb_nodes))
     with tqdm(total=args.test_rounds) as pbar_test:
         pbar_test.set_description('Testing')
-        for _ in range(args.test_rounds):
-            cur_round_ano_score = []
-            labels = []
-            for g, label in test_loader:
-                g = g.to(device)
+        for round in range(args.test_rounds):
+            all_idx = list(range(nb_nodes))
+            random.shuffle(all_idx)
+
+            for batch_idx in tqdm(range(batch_num)):
+
+                is_final_batch = (batch_idx == (batch_num - 1))
+                if not is_final_batch:
+                    idx = all_idx[batch_idx *
+                                  batch_size: (batch_idx + 1) * batch_size]
+                else:
+                    idx = all_idx[batch_idx * batch_size:]
+
+                # cur_batch_size = len(idx)
+                ba = []
+                bf = []
+
+                for i in idx:
+                    cur_adj = adj[:, subgraphs[i], :][:, :, subgraphs[i]]
+                    # (1, subg_size, ft_size)
+                    cur_feat = features[:, subgraphs[i], :]
+                    ba.append(cur_adj)
+                    bf.append(cur_feat)
+
+                ba = torch.cat(ba)
+                bf = torch.cat(bf)
+
                 # ===================forward=====================
                 with torch.no_grad():
-                    scores_final = model(g, is_eval=True).cpu().numpy()
-                cur_round_ano_score.append(scores_final)
-                labels.append(label)
+                    output = model(ba, bf)
+                    gaussian_score = clustering.get_Mahalanobis_score(
+                        output, args.num_clusters, centroids, precision)
+                    pred = gaussian_score.max(1)[1]  # (batch_size, )
+                    pure_gau = gaussian_score[torch.arange(
+                        gaussian_score.shape[0]), pred].unsqueeze(dim=-1)
+                    ano_score = -pure_gau.squeeze(1)
+
+                multi_round_ano_score[round, idx] = ano_score
+
             pbar_test.update(1)
 
-            auc = roc_auc_score(labels, cur_round_ano_score)
-            multi_round_ano_score.append(auc)
-            print('Testing AUC:{:.4f}'.format(auc), flush=True)
+    ano_score_final = np.mean(multi_round_ano_score,
+                              axis=0) + np.std(multi_round_ano_score, axis=0)
+    auc = roc_auc_score(ano_labels, ano_score_final)
+    # all_auc.append(auc)
+    print('Testing AUC:{:.4f}'.format(auc), flush=True)
 
-        final_auc = np.mean(multi_round_ano_score)
-        print('FINAL TESTING AUC:{:.4f}'.format(final_auc))
+
+def compute_features(model, subgraphs, embedding_dim, device):
+    """
+    for data, index in eval_loader:
+        data = data
+        data = data.to(device)
+        feat = model(data)
+        features[index] = feat 
+    """
+    print('Computing features...')
+    model.eval()
+
+    all_feat = torch.zeros(nb_nodes, embedding_dim).to(device)
+    with tqdm(total=batch_num) as pbar_eval:
+        pbar_eval.set_description('Generating Features')
+        for batch_idx in tqdm(range(batch_num)):
+
+            is_final_batch = (batch_idx == (batch_num - 1))
+            if not is_final_batch:
+                idx = all_idx[batch_idx * batch_size: (batch_idx + 1) * batch_size]
+            else:
+                idx = all_idx[batch_idx * batch_size:]
+
+            ba = []
+            bf = []
+
+            for i in idx:
+                cur_adj = adj[:, subgraphs[i], :][:, :, subgraphs[i]]
+                cur_feat = features[:, subgraphs[i], :]  # (1, subg_size, ft_size)
+                ba.append(cur_adj)
+                bf.append(cur_feat)
+
+            ba = torch.cat(ba)
+            bf = torch.cat(bf)
+            feat = model(ba, bf)
+            all_feat[idx] = feat
+            pbar_eval.update(1)
+    return all_feat.detach().numpy()
 
 
 def adjust_learning_rate(optimizer, epoch, args):
@@ -274,11 +305,9 @@ def adjust_learning_rate(optimizer, epoch, args):
 class AverageMeter(object):
     """Computes and stores the average and current value"""
 
-    def __init__(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
+    def __init__(self, name, fmt=':f'):
+        self.name = name
+        self.fmt = fmt
         self.reset()
 
     def reset(self):
@@ -292,6 +321,10 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
+    def __str__(self):
+        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
+        return fmtstr.format(**self.__dict__)
 
 
 class ProgressMeter(object):
@@ -312,24 +345,96 @@ class ProgressMeter(object):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='')
-    parser.add_argument('--seed', type=int, default=39)
-    parser.add_argument('--expid', type=int, default=1)
-    parser.add_argument('--workers', type=int, default=4)
-    parser.add_argument('--device', type=str, default='cuda:0')
-    parser.add_argument('--dataset', type=str, default='cora')
-    parser.add_argument('--optimizer', type=int, default='sgd')
-    parser.add_argument('--learning_rate', type=float, default=1e-3)
-    parser.add_argument('--weight_decay', type=float, default=0.0)
-    parser.add_argument('--runs', type=int, default=1)
-    parser.add_argument('--embedding_dim', type=int, default=64)
-    parser.add_argument('--patience', type=int, default=100)
-    parser.add_argument('--num_epoch', type=int, default=400)
-    parser.add_argument('--batch_size', type=int, default=300)
-    parser.add_argument('--subgraph_size', type=int, default=4)
-    parser.add_argument('--readout', type=str, default='avg')
-    parser.add_argument('--auc_test_rounds', type=int, default=256)
-    parser.add_argument('--negsamp_ratio_patch', type=int, default=6)
-    parser.add_argument('--negsamp_ratio_context', type=int, default=1)
-    args = parser.parse_args()
-    main(args)
+    device = args.device
+
+    print('Dataset: {}'.format(args.dataset), flush=True)
+    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+
+    random.seed(args.seed)
+    dgl.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    batch_size = args.batch_size
+    subgraph_size = args.subgraph_size
+
+    # data preprocess
+    adj, features, labels, ano_labels, str_ano_labels, attr_ano_labels = load_mat(
+        args.dataset)
+    features = preprocess_features(features)
+    dgl_graph = adj_to_dgl_graph(adj)
+
+    nb_nodes = features.shape[0]
+    all_idx = list(range(nb_nodes))
+    ft_size = features.shape[1]
+
+    adj_hat = aug_random_edge(adj, 0.2)
+    adj = adj.todense()
+    adj_hat = adj_hat.todense()
+
+    # features = torch.FloatTensor(features)
+    # labels = torch.FloatTensor(labels)
+    # ano_labels = torch.FloatTensor(ano_labels)
+
+    features = torch.FloatTensor(features[np.newaxis]).to(device)
+    adj = torch.FloatTensor(adj[np.newaxis]).to(device)
+    adj_hat = torch.FloatTensor(adj_hat[np.newaxis]).to(device)
+    labels = torch.FloatTensor(labels[np.newaxis]).to(device)
+    # build dataset
+    # train_dataset = GraphDataset(adj=adj, features=features, aug=None)
+    # eval_dataset = GraphDataset(adj=adj, features=features, aug=None)
+    # test_dataset = GraphDataset(adj=adj, features=features, aug=None)
+
+    # train_loader = torch.utils.data.DataLoader(
+    # 	dataset=train_dataset,
+    # 	batch_size=args.batch_size,
+    # 	collate_fn=labeled_batcher(),
+    # 	shuffle=True,
+    # 	pin_memory=True,
+    # 	drop_last=True
+    # )
+
+    # build model
+    gnn_args = {
+        'ft_size': ft_size,
+        'output_dim': args.embedding_dim,
+        'gnn_model': args.model
+    }
+
+    model = GraphEncoder(**gnn_args)
+    # transformer = torch.eye(args.embedding_dim, dtype=torch.float32, requires_grad=False)
+    
+    # build optimizer
+    if args.optimizer == "sgd":
+        optimizer = torch.optim.SGD(
+            model.parameters(),
+            lr=args.lr,
+            momentum=args.sgd_momentum,
+            weight_decay=args.weight_decay,
+        )
+    elif args.optimizer == "adam":
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+    elif args.optimizer == "adagrad":
+        optimizer = torch.optim.Adagrad(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+    else:
+        raise NotImplementedError
+
+    # all_auc = [] 
+    # loss function
+    criterion = nn.CrossEntropyLoss()
+    # iteration length
+    batch_num = nb_nodes // batch_size + 1
+
+    train()
+    test()

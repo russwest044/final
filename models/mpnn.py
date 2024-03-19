@@ -37,11 +37,11 @@ class UnsupervisedMPNN(nn.Module):
 
     def __init__(
         self,
-        output_dim=32,
-        node_input_dim=32,
-        node_hidden_dim=32,
-        edge_input_dim=32,
-        edge_hidden_dim=32,
+        output_dim=64,
+        node_input_dim=64,
+        node_hidden_dim=64,
+        edge_input_dim=64,
+        edge_hidden_dim=64,
         num_step_message_passing=6,
         lstm_as_gate=False,
     ):
@@ -49,15 +49,15 @@ class UnsupervisedMPNN(nn.Module):
 
         self.num_step_message_passing = num_step_message_passing
         self.lin0 = nn.Linear(node_input_dim, node_hidden_dim)
-        edge_network = nn.Sequential(
-            nn.Linear(edge_input_dim, edge_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(edge_hidden_dim, node_hidden_dim * node_hidden_dim),
-        )
+        # edge_network = nn.Sequential(
+        #     nn.Linear(edge_input_dim, edge_hidden_dim),
+        #     nn.ReLU(),
+        #     nn.Linear(edge_hidden_dim, node_hidden_dim * node_hidden_dim),
+        # )
         self.conv = NNConv(
             in_feats=node_hidden_dim,
             out_feats=node_hidden_dim,
-            edge_func=edge_network,
+            # edge_func=edge_network,
             aggregator_type="sum",
         )
         self.lstm_as_gate = lstm_as_gate
