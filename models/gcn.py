@@ -15,7 +15,7 @@ class UnsupervisedGCN(nn.Module):
         node_input_dim, 
         hidden_size=64,
         num_layer=2,
-        readout="avg",
+        readout="root",
         layernorm: bool = False,
         set2set_lstm_layer: int = 3,
         set2set_iter: int = 6,
@@ -53,14 +53,14 @@ class UnsupervisedGCN(nn.Module):
 
     def forward(self, g, feats, efeats=None):
         for layer in self.layers:
-            feats = layer(g, feats)
+            feats = layer(g, feats) # (B*S, d)
         feats = self.readout(g, feats)
         if isinstance(self.readout, Set2Set):
             feats = self.linear(feats)
         if self.layernorm:
             feats = self.ln(feats)
         return feats
-
+    
 
 if __name__ == "__main__":
     model = UnsupervisedGCN(node_input_dim=64)

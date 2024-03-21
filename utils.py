@@ -191,11 +191,9 @@ def gaussian_noised_feature(X):
         X: the attribute matrix
     Returns: the noised attribute matrix X_tilde
     """
-    N_1 = torch.Tensor(np.random.normal(1, 0.1, X.shape))
-    N_2 = torch.Tensor(np.random.normal(1, 0.1, X.shape))
-    X_tilde1 = X * N_1
-    X_tilde2 = X * N_2
-    return X_tilde1, X_tilde2
+    N = torch.Tensor(np.random.normal(1, 0.1, X.shape))
+    X_tilde = X * N
+    return X_tilde
 
 
 def gdc(A: sp.csr_matrix, alpha: float, eps: float):

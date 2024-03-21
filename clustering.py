@@ -3,7 +3,9 @@ import torch
 import faiss
 from tqdm import tqdm
 import torch.nn.functional as F
-# from dataset import ReassignedDataset
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.manifold import TSNE
 
 
 def sample_estimator(nd_lists, features, centroids, args):
@@ -135,7 +137,7 @@ def run_kmeans(x, args):
 
 	# faiss implementation of k-means
 	clus = faiss.Clustering(d, k)
-	clus.verbose = True
+	clus.verbose = False
 	clus.niter = 20
 	clus.nredo = 5
 	clus.seed = args.seed
@@ -191,6 +193,39 @@ def run_kmeans(x, args):
 	results['nd2cluster'] = nd2cluster 
 		
 	return results
+
+
+def visualize(X, labels, savepath='./fig/cluster.png'):
+	"""
+	T-SNE Visualization 
+	Args:
+		X : feature vectors
+		labels: predicted labels
+	"""
+	tsne = TSNE()
+	X_tsne = tsne.fit_transform(X)
+
+	plt.figure(figsize=(10, 8))
+	sns.set_theme(style="darkgrid", rc={"axes.linewidth": 1, "axes.edgecolor": "black"})
+
+	for label in np.unique(labels):
+		plt.scatter(
+			X_tsne[labels == label, 0], 
+			X_tsne[labels == label, 1], 
+			label=f'Cluster {label}', 
+			cmap='viridis'
+		)
+
+	plt.legend(loc='lower right')
+	# plt.title("Test Visualization")
+	# hide axis
+	plt.xticks([])
+	plt.yticks([])
+	# plt.axis('off')
+	
+	if savepath:
+		plt.savefig(savepath, dpi=600, bbox_inches='tight')
+	# plt.show()
 
 # def cluster_assign(nd_lists, dataset):
 #     """Creates a dataset from clustering, with clusters as labels.

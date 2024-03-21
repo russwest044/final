@@ -41,7 +41,7 @@ parser.add_argument('--print_cluster_freq', type=int, default=33)
 parser.add_argument('--batch_size', type=int, default=300)
 
 parser.add_argument('--alpha', type=float, default=0.8)
-parser.add_argument('--temperature', type=float, default=1.0)
+parser.add_argument('--temperature', type=float, default=100.0)
 parser.add_argument('--subgraph_size', type=int, default=4)
 # parser.add_argument('--readout', type=str, default='avg')
 parser.add_argument('--test_rounds', type=int, default=10)
@@ -152,10 +152,10 @@ def train():
             output = model(ba, bf, get_node=True) # (2*batch_size, d)
             output = output.view(2, -1, args.embedding_dim) # (2, batch_size, d)
             output = args.alpha * output[0] + (1-args.alpha) * output[1] # (batch_size, d)
-            guassian_score = clustering.get_Mahalanobis_score(
-                output, args.num_clusters, centroids, precision)
+            output = proj(output)
+            score = output / args.temperature
             
-            loss = criterion(guassian_score, cluster_result['nd2cluster'][idx])
+            loss = criterion(score, cluster_result['nd2cluster'][idx])
             # cur_labels = cluster_result['nd2cluster'][idx].repeat(2)
             # loss = criterion(guassian_score, cur_labels)
 
@@ -249,12 +249,11 @@ def test():
                 output = model(ba, bf, get_node=True)
                 output = output.view(2, -1, args.embedding_dim) # (2, batch_size, d)
                 output = args.alpha * output[0] + (1-args.alpha) * output[1] # (batch_size, d)
-                gaussian_score = clustering.get_Mahalanobis_score(
-                    output, args.num_clusters, centroids, precision)
-                pred = gaussian_score.max(1)[1]
-                pure_gau = gaussian_score[torch.arange(
-                    gaussian_score.shape[0]), pred].unsqueeze(dim=-1)
-                ano_score = -pure_gau.squeeze(1)
+                output = proj(output)
+                score = output / args.temperature
+                pred = score.max(1)[1]  # (2*batch_size, )
+                pure_gau = score[torch.arange(score.shape[0]), pred].unsqueeze(dim=-1)
+                ano_score = pure_gau.squeeze(1)
 
             multi_round_ano_score[round, idx] = ano_score
 
@@ -277,6 +276,7 @@ def compute_features(model, subgraphs, embedding_dim, device):
     """
     print('Computing features...', flush=True)
     model.eval()
+    proj.eval()
 
     all_feat = torch.zeros(nb_nodes, embedding_dim).to(device)
     with tqdm(total=batch_num) as pbar_eval:
@@ -394,7 +394,7 @@ if __name__ == '__main__':
 
     features = torch.FloatTensor(features[np.newaxis]).to(device)
     # add perturbations
-    # features = gaussian_noised_feature(features)
+    features = gaussian_noised_feature(features)
     adj = torch.FloatTensor(adj[np.newaxis]).to(device)
     adj_hat = torch.FloatTensor(adj_hat[np.newaxis]).to(device)
     labels = torch.FloatTensor(labels[np.newaxis]).to(device)
@@ -407,6 +407,7 @@ if __name__ == '__main__':
     }
 
     model = GraphEncoder(**gnn_args)
+    proj = nn.Linear(args.embedding_dim, args.num_clusters)
     
     # build optimizer
     if args.optimizer == "sgd":

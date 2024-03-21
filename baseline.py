@@ -34,13 +34,12 @@ parser.add_argument('--sgd_momentum', type=float, default=0.9)
 parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--weight_decay', type=float, default=1e-6)
 parser.add_argument('--embedding_dim', type=int, default=64)
-parser.add_argument('--epochs', type=int, default=10)
+parser.add_argument('--epochs', type=int, default=20)
 parser.add_argument('--warmup_epochs', type=int, default=1)
 parser.add_argument('--print_freq', type=int, default=10)
 parser.add_argument('--print_cluster_freq', type=int, default=33)
 parser.add_argument('--batch_size', type=int, default=300)
 
-parser.add_argument('--alpha', type=float, default=0.8)
 parser.add_argument('--temperature', type=float, default=1.0)
 parser.add_argument('--subgraph_size', type=int, default=4)
 # parser.add_argument('--readout', type=str, default='avg')
@@ -49,10 +48,10 @@ parser.add_argument('--negsamp_ratio_patch', type=int, default=6)
 parser.add_argument('--negsamp_ratio_context', type=int, default=1)
 
 # ratio
-# parser.add_argument('--alpha', type=float, default=0.1,
-#                     help='how much the first view involves')
-# parser.add_argument('--beta', type=float, default=0.1,
-#                     help='how much the second view involves')
+parser.add_argument('--alpha', type=float, default=0.1,
+                    help='how much the first view involves')
+parser.add_argument('--beta', type=float, default=0.1,
+                    help='how much the second view involves')
 args = parser.parse_args()
 
 
@@ -92,9 +91,9 @@ def train():
         precision = precision.detach()
 
         # cluster visualization
-        # if epoch % args.print_cluster_freq == 0:
-        #     clustering.visualize(eval_feat, cluster_result['nd2cluster'], 
-        #                          savepath='./fig/' + f'cluster_{epoch}.png')
+        if epoch % args.print_cluster_freq == 0:
+            clustering.visualize(eval_feat, cluster_result['nd2cluster'], 
+                                 savepath='./fig/' + f'cluster_{epoch}.png')
 
         # train for one epoch
         batch_time = AverageMeter('Time', ':6.3f')
@@ -126,11 +125,6 @@ def train():
             ba = []
             bf = []
 
-            added_adj_zero_row = torch.zeros((cur_batch_size, 1, subgraph_size)).to(device)
-            added_adj_zero_col = torch.zeros((cur_batch_size, subgraph_size + 1, 1)).to(device)
-            added_adj_zero_col[:, -1, :] = 1.
-            added_feat_zero_row = torch.zeros((cur_batch_size, 1, ft_size)).to(device)
-
             for i in idx:
                 cur_adj = adj[:, subgraphs[i], :][:, :, subgraphs[i]]
                 # (1, subg_size, ft_size)
@@ -139,25 +133,21 @@ def train():
                 bf.append(cur_feat)
 
             ba = torch.cat(ba)
-            ba = torch.cat((ba, added_adj_zero_row), dim=1)
-            ba = torch.cat((ba, added_adj_zero_col), dim=2)
             bf = torch.cat(bf)
-            bf = torch.cat((bf[:, :-1, :], added_feat_zero_row, bf[:, -1:, :]), dim=1)
 
             # adjust learning rate
             # lr = adjust_learning_rate(optimizer, epoch + i / iters_per_epoch, args)
             learning_rates.update(args.lr)
 
             # model forward
-            output = model(ba, bf, get_node=True) # (2*batch_size, d)
-            output = output.view(2, -1, args.embedding_dim) # (2, batch_size, d)
-            output = args.alpha * output[0] + (1-args.alpha) * output[1] # (batch_size, d)
+
+            output = model(ba, bf)
+            # print(output.requires_grad_())
             guassian_score = clustering.get_Mahalanobis_score(
                 output, args.num_clusters, centroids, precision)
-            
+            # guassian_score.retain_grad()
+
             loss = criterion(guassian_score, cluster_result['nd2cluster'][idx])
-            # cur_labels = cluster_result['nd2cluster'][idx].repeat(2)
-            # loss = criterion(guassian_score, cur_labels)
 
             losses.update(loss.item(), cur_batch_size)
             # compute gradient and do SGD step
@@ -172,7 +162,12 @@ def train():
 
             if batch_idx % args.print_freq == 0:
                 progress.display(batch_idx)
-            
+
+        # print("==> Metric Learning...")
+        # W = clustering.learn_metric(features, cluster_result['nd2cluster'])
+        # transformer = torch.mm(W, transformer)
+        # transformer = transformer.to(device)
+
         # save state
         # checkpoint = {
         #     "model_state_dict": model.state_dict(),
@@ -246,12 +241,10 @@ def test():
 
             # ===================forward=====================
             with torch.no_grad():
-                output = model(ba, bf, get_node=True)
-                output = output.view(2, -1, args.embedding_dim) # (2, batch_size, d)
-                output = args.alpha * output[0] + (1-args.alpha) * output[1] # (batch_size, d)
+                output = model(ba, bf)
                 gaussian_score = clustering.get_Mahalanobis_score(
                     output, args.num_clusters, centroids, precision)
-                pred = gaussian_score.max(1)[1]
+                pred = gaussian_score.max(1)[1]  # (batch_size, )
                 pure_gau = gaussian_score[torch.arange(
                     gaussian_score.shape[0]), pred].unsqueeze(dim=-1)
                 ano_score = -pure_gau.squeeze(1)
@@ -299,9 +292,7 @@ def compute_features(model, subgraphs, embedding_dim, device):
 
             ba = torch.cat(ba)
             bf = torch.cat(bf)
-            feat = model(ba, bf, get_node=True) # (2*batch_size, d)
-            feat = feat.view(2, -1, embedding_dim) # (2, batch_size, d)
-            feat = args.alpha * feat[0] + (1-args.alpha) * feat[1] # (batch_size, d)
+            feat = model(ba, bf)
             all_feat[idx] = feat
             pbar_eval.update(1)
     return all_feat.detach().numpy()
@@ -393,11 +384,24 @@ if __name__ == '__main__':
     adj_hat = adj_hat.todense()
 
     features = torch.FloatTensor(features[np.newaxis]).to(device)
-    # add perturbations
-    # features = gaussian_noised_feature(features)
     adj = torch.FloatTensor(adj[np.newaxis]).to(device)
     adj_hat = torch.FloatTensor(adj_hat[np.newaxis]).to(device)
     labels = torch.FloatTensor(labels[np.newaxis]).to(device)
+
+    # adj = adj_hat
+    # build dataset
+    # train_dataset = GraphDataset(adj=adj, features=features, aug=None)
+    # eval_dataset = GraphDataset(adj=adj, features=features, aug=None)
+    # test_dataset = GraphDataset(adj=adj, features=features, aug=None)
+
+    # train_loader = torch.utils.data.DataLoader(
+    # 	dataset=train_dataset,
+    # 	batch_size=args.batch_size,
+    # 	collate_fn=labeled_batcher(),
+    # 	shuffle=True,
+    # 	pin_memory=True,
+    # 	drop_last=True
+    # )
 
     # build model
     gnn_args = {
@@ -407,6 +411,7 @@ if __name__ == '__main__':
     }
 
     model = GraphEncoder(**gnn_args)
+    # transformer = torch.eye(args.embedding_dim, dtype=torch.float32, requires_grad=False)
     
     # build optimizer
     if args.optimizer == "sgd":
