@@ -195,7 +195,7 @@ def run_kmeans(x, args):
 	return results
 
 
-def visualize(X, labels, savepath='./fig/cluster.png'):
+def visualize(X, labels, ano_labels, savepath='./fig/cluster.png'):
 	"""
 	T-SNE Visualization 
 	Args:
@@ -206,7 +206,7 @@ def visualize(X, labels, savepath='./fig/cluster.png'):
 	X_tsne = tsne.fit_transform(X)
 
 	plt.figure(figsize=(10, 8))
-	sns.set_theme(style="darkgrid", rc={"axes.linewidth": 1, "axes.edgecolor": "black"})
+	sns.set_theme(style="whitegrid", rc={"axes.linewidth": 1, "axes.edgecolor": "black"})
 
 	for label in np.unique(labels):
 		plt.scatter(
@@ -214,6 +214,14 @@ def visualize(X, labels, savepath='./fig/cluster.png'):
 			X_tsne[labels == label, 1], 
 			label=f'Cluster {label}', 
 			cmap='viridis'
+		)
+	# plot anomalies
+	anomaly_mask = ano_labels == 1
+	plt.scatter(
+			X_tsne[anomaly_mask, 0], 
+			X_tsne[anomaly_mask, 1], 
+			label=f'Anomaly', 
+			c='black'
 		)
 
 	plt.legend(loc='lower right')
@@ -224,7 +232,7 @@ def visualize(X, labels, savepath='./fig/cluster.png'):
 	# plt.axis('off')
 	
 	if savepath:
-		plt.savefig(savepath, dpi=600, bbox_inches='tight')
+		plt.savefig(savepath, dpi=300, bbox_inches='tight')
 	# plt.show()
 
 # def cluster_assign(nd_lists, dataset):

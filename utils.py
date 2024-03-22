@@ -24,7 +24,7 @@ def labeled_batcher():
 
     return batcher_dev
 
-def load_mat(dataset, train_rate=0.3, val_rate=0.1):
+def load_mat(dataset):
     """Load data."""
     data = sio.loadmat("./data/{}.mat".format(dataset))
     label = data['Label'] if ('Label' in data) else data['gnd']
@@ -45,16 +45,7 @@ def load_mat(dataset, train_rate=0.3, val_rate=0.1):
     else:
         str_ano_labels = None
         attr_ano_labels = None
-
-    # num_node = adj.shape[0]
-    # num_train = int(num_node * train_rate)
-    # num_val = int(num_node * val_rate)
-    # all_idx = list(range(num_node))
-    # random.shuffle(all_idx)
-    # idx_train = all_idx[: num_train]
-    # idx_val = all_idx[num_train: num_train + num_val]
-    # idx_test = all_idx[num_train + num_val:]
-    # return adj, feat, labels, idx_train, idx_val, idx_test, ano_labels, str_ano_labels, attr_ano_labels
+    
     return adj, feat, labels, ano_labels, str_ano_labels, attr_ano_labels
 
 

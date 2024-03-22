@@ -8,6 +8,7 @@ import numpy as np
 import random
 import argparse
 from tqdm import tqdm
+import clustering
 from scipy.sparse import csr_matrix
 from utils import *
 from models.graph_encoder import GraphEncoder
@@ -21,43 +22,42 @@ parser.add_argument('--seed', type=int, default=39)
 parser.add_argument('--workers', type=int, default=4)
 parser.add_argument('--device', type=str, default='cuda:0')
 # dataset
-parser.add_argument('--dataset', type=str, default='cora')
+parser.add_argument('--dataset', type=str, default='blogcatalog', 
+                    choices=["cora", "citeseer", "blogcatalog", 
+                             "flickr", "citation", "acm", "pubmed"])
+# cora 1e-3 0.9 7
+# citeseer 1e-3 0.9 7
+# blogcatalog 1e-4 0.9 5
+
+
 # model definition
 parser.add_argument("--model", type=str, default="gcn",
                     choices=["gat", "mpnn", "gin", "gcn"])
 # num of clusters
-parser.add_argument('--nmb_prototypes', type=int, default=7)
-parser.add_argument('--num_clusters', type=int, default=7)
+parser.add_argument('--nmb_prototypes', type=int, default=5)
+parser.add_argument('--num_clusters', type=int, default=5)
 # hyperparameters
-parser.add_argument('--optimizer', type=str, default='sgd')
+parser.add_argument('--epochs', type=int, default=10)
+parser.add_argument('--warmup_epochs', type=int, default=1)
+parser.add_argument('--optimizer', type=str, default='adam')
 parser.add_argument('--sgd_momentum', type=float, default=0.9)
-parser.add_argument('--lr', type=float, default=1e-3)
+parser.add_argument('--lr', type=float, default=1e-4)
 parser.add_argument('--weight_decay', type=float, default=1e-6)
 parser.add_argument('--embedding_dim', type=int, default=64)
-parser.add_argument('--epochs', type=int, default=100)
-parser.add_argument('--warmup_epochs', type=int, default=1)
-parser.add_argument('--print_freq', type=int, default=10)
-parser.add_argument('--print_cluster_freq', type=int, default=33)
+parser.add_argument('--subgraph_size', type=int, default=6)
 parser.add_argument('--batch_size', type=int, default=300)
-
 parser.add_argument('--alpha', type=float, default=0.8)
 parser.add_argument('--temperature', type=float, default=1.0)
-parser.add_argument('--subgraph_size', type=int, default=4)
-# parser.add_argument('--readout', type=str, default='avg')
+# print
+parser.add_argument('--print_freq', type=int, default=10)
+parser.add_argument('--print_cluster_freq', type=int, default=33)
 parser.add_argument('--test_rounds', type=int, default=10)
-parser.add_argument('--negsamp_ratio_patch', type=int, default=6)
-parser.add_argument('--negsamp_ratio_context', type=int, default=1)
 
 parser.add_argument("--world_size", default=-1, type=int, help="""
                     number of processes: it is set automatically and
                     should not be passed as argument""")
 parser.add_argument("--freeze_prototypes_niters", default=1e10, type=int,
                     help="freeze the prototypes during this many iterations from the start")
-# ratio
-# parser.add_argument('--alpha', type=float, default=0.1,
-#                     help='how much the first view involves')
-# parser.add_argument('--beta', type=float, default=0.1,
-#                     help='how much the second view involves')
 args = parser.parse_args()
 
 
@@ -65,7 +65,6 @@ def train():
     # training
     for epoch in range(args.epochs):
         print("==> training...")
-        # start_time = time.time()
         subgraphs = generate_rwr_subgraph(dgl_graph, subgraph_size)
         criterion = nn.CrossEntropyLoss(ignore_index=-100)
 
@@ -76,7 +75,7 @@ def train():
 
         # cluster visualization
         # if epoch % args.print_cluster_freq == 0:
-        #     clustering.visualize(eval_feat, cluster_result['nd2cluster'], 
+        #     clustering.visualize(local_memory_embeddings, assignments, ano_labels, 
         #                          savepath='./fig/' + f'cluster_{epoch}.png')
 
         # train for one epoch
@@ -186,27 +185,21 @@ def test():
     print('Testing AUC!', flush=True)
     # print('Loading {}th epoch'.format(best_t), flush=True)
     # checkpoint = torch.load('./pretrained/{}.pth'.format(args.dataset))
-    # model.load_state_dict(checkpoint["model_state_dict"])
-    # cluster_result = checkpoint["cluster_result"]
-    # transformer = checkpoint["transformer"]
     # model.load_state_dict(torch.load('./pretrained/{}.pkl'.format(args.dataset)))
 
     # switch to eval mode
     model.eval()
-
-    # get features from frozen encoder
-    subgraphs = generate_rwr_subgraph(dgl_graph, subgraph_size)
-    local_memory_embeddings = compute_features(model, subgraphs, args.embedding_dim, device)
-    # initialize prototypes for classification
-    _ = cluster_memory(model, local_memory_embeddings, nb_nodes)
     
     multi_round_ano_score = np.zeros((args.test_rounds, nb_nodes))
     # with tqdm(total=args.test_rounds) as pbar_test:
     #     pbar_test.set_description('Testing')
-    for round in tqdm(range(args.test_rounds)):
+    for round in range(args.test_rounds):
         all_idx = list(range(nb_nodes))
         random.shuffle(all_idx)
         subgraphs = generate_rwr_subgraph(dgl_graph, subgraph_size)
+        local_memory_embeddings = compute_features(model, subgraphs, args.embedding_dim, device)
+        # initialize prototypes for classification
+        _ = cluster_memory(model, local_memory_embeddings, nb_nodes)
         
         for batch_idx in range(batch_num):
 
@@ -246,7 +239,7 @@ def test():
                 score = output / args.temperature
                 pred = score.max(1)[1]
                 pure_gau = score[torch.arange(score.shape[0]), pred].unsqueeze(dim=-1)
-                ano_score = pure_gau.squeeze(1)
+                ano_score = -pure_gau.squeeze(1)
 
             multi_round_ano_score[round, idx] = ano_score
 
@@ -272,40 +265,40 @@ def compute_features(model, subgraphs, embedding_dim, device):
     proj.eval()
 
     all_feat = torch.zeros(nb_nodes, embedding_dim).to(device)
-    with tqdm(total=batch_num) as pbar_eval:
-        pbar_eval.set_description('Generating Features')
-        for batch_idx in range(batch_num):
-            is_final_batch = (batch_idx == (batch_num - 1))
-            if not is_final_batch:
-                idx = all_idx[batch_idx * batch_size: (batch_idx + 1) * batch_size]
-            else:
-                idx = all_idx[batch_idx * batch_size:]
+    # with tqdm(total=batch_num) as pbar_eval:
+    #     pbar_eval.set_description('Generating Features')
+    for batch_idx in range(batch_num):
+        is_final_batch = (batch_idx == (batch_num - 1))
+        if not is_final_batch:
+            idx = all_idx[batch_idx * batch_size: (batch_idx + 1) * batch_size]
+        else:
+            idx = all_idx[batch_idx * batch_size:]
 
-            cur_batch_size = len(idx)
-            ba = []
-            bf = []
-            added_adj_zero_row = torch.zeros((cur_batch_size, 1, subgraph_size)).to(device)
-            added_adj_zero_col = torch.zeros((cur_batch_size, subgraph_size + 1, 1)).to(device)
-            added_adj_zero_col[:, -1, :] = 1.
-            added_feat_zero_row = torch.zeros((cur_batch_size, 1, ft_size)).to(device)
+        cur_batch_size = len(idx)
+        ba = []
+        bf = []
+        added_adj_zero_row = torch.zeros((cur_batch_size, 1, subgraph_size)).to(device)
+        added_adj_zero_col = torch.zeros((cur_batch_size, subgraph_size + 1, 1)).to(device)
+        added_adj_zero_col[:, -1, :] = 1.
+        added_feat_zero_row = torch.zeros((cur_batch_size, 1, ft_size)).to(device)
 
-            for i in idx:
-                cur_adj = adj[:, subgraphs[i], :][:, :, subgraphs[i]]
-                cur_feat = features[:, subgraphs[i], :]  # (1, subg_size, ft_size)
-                ba.append(cur_adj)
-                bf.append(cur_feat)
+        for i in idx:
+            cur_adj = adj[:, subgraphs[i], :][:, :, subgraphs[i]]
+            cur_feat = features[:, subgraphs[i], :]  # (1, subg_size, ft_size)
+            ba.append(cur_adj)
+            bf.append(cur_feat)
 
-            ba = torch.cat(ba)
-            ba = torch.cat((ba, added_adj_zero_row), dim=1)
-            ba = torch.cat((ba, added_adj_zero_col), dim=2)
-            bf = torch.cat(bf)
-            bf = torch.cat((bf[:, :-1, :], added_feat_zero_row, bf[:, -1:, :]), dim=1)
+        ba = torch.cat(ba)
+        ba = torch.cat((ba, added_adj_zero_row), dim=1)
+        ba = torch.cat((ba, added_adj_zero_col), dim=2)
+        bf = torch.cat(bf)
+        bf = torch.cat((bf[:, :-1, :], added_feat_zero_row, bf[:, -1:, :]), dim=1)
 
-            feat = model(ba, bf, get_node=True)[0] # (2*batch_size, d)
-            feat = feat.view(2, -1, embedding_dim)
-            feat = args.alpha * feat[0] + (1-args.alpha) * feat[1] # (batch_size, d)
-            all_feat[idx] = feat
-            pbar_eval.update(1)
+        feat = model(ba, bf, get_node=True)[0] # (2*batch_size, d)
+        feat = feat.view(2, -1, embedding_dim)
+        feat = args.alpha * feat[0] + (1-args.alpha) * feat[1] # (batch_size, d)
+        all_feat[idx] = feat
+            # pbar_eval.update(1)
     return all_feat.detach()
 
 

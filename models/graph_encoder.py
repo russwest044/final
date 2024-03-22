@@ -54,7 +54,7 @@ class GraphEncoder(nn.Module):
 		gnn_model="mpnn",
 		lstm_as_gate=False,
 		readout='avg',
-		nmb_prototypes=None, 
+		nmb_prototypes=0, 
 	):
 		super(GraphEncoder, self).__init__()
 

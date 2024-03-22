@@ -21,7 +21,9 @@ parser.add_argument('--seed', type=int, default=39)
 parser.add_argument('--workers', type=int, default=4)
 parser.add_argument('--device', type=str, default='cuda:0')
 # dataset
-parser.add_argument('--dataset', type=str, default='cora')
+parser.add_argument('--dataset', type=str, default='citeseer', 
+                    choices=["cora", "citeseer", "blogcatalog", 
+                             "flickr", "citation", "acm", "pubmed"])
 # model definition
 parser.add_argument("--model", type=str, default="gcn",
                     choices=["gat", "mpnn", "gin", "gcn"])
@@ -29,30 +31,22 @@ parser.add_argument("--model", type=str, default="gcn",
 parser.add_argument('--nmb_prototypes', type=int, default=7)
 parser.add_argument('--num_clusters', type=int, default=7)
 # hyperparameters
-parser.add_argument('--optimizer', type=str, default='sgd')
-parser.add_argument('--sgd_momentum', type=float, default=0.9)
-parser.add_argument('--lr', type=float, default=1e-3)
-parser.add_argument('--weight_decay', type=float, default=1e-6)
-parser.add_argument('--embedding_dim', type=int, default=64)
 parser.add_argument('--epochs', type=int, default=10)
 parser.add_argument('--warmup_epochs', type=int, default=1)
+parser.add_argument('--optimizer', type=str, default='adam')
+parser.add_argument('--sgd_momentum', type=float, default=0.9)
+parser.add_argument('--lr', type=float, default=1e-4)
+parser.add_argument('--weight_decay', type=float, default=1e-6)
+parser.add_argument('--embedding_dim', type=int, default=64)
+parser.add_argument('--subgraph_size', type=int, default=4)
+parser.add_argument('--batch_size', type=int, default=300)
+parser.add_argument('--alpha', type=float, default=0.9)
+# print
 parser.add_argument('--print_freq', type=int, default=10)
 parser.add_argument('--print_cluster_freq', type=int, default=33)
-parser.add_argument('--batch_size', type=int, default=300)
-
-parser.add_argument('--alpha', type=float, default=0.8)
-parser.add_argument('--temperature', type=float, default=100.0)
-parser.add_argument('--subgraph_size', type=int, default=4)
-# parser.add_argument('--readout', type=str, default='avg')
 parser.add_argument('--test_rounds', type=int, default=10)
-parser.add_argument('--negsamp_ratio_patch', type=int, default=6)
-parser.add_argument('--negsamp_ratio_context', type=int, default=1)
 
-# ratio
-# parser.add_argument('--alpha', type=float, default=0.1,
-#                     help='how much the first view involves')
-# parser.add_argument('--beta', type=float, default=0.1,
-#                     help='how much the second view involves')
+parser.add_argument('--temperature', type=float, default=100.0)
 args = parser.parse_args()
 
 
@@ -60,7 +54,6 @@ def train():
     # training
     for epoch in range(args.epochs):
         print("==> training...")
-        # start_time = time.time()
         subgraphs = generate_rwr_subgraph(dgl_graph, subgraph_size)
 
         # placeholder for clustering result
@@ -75,12 +68,9 @@ def train():
 
         # get features from frozen encoder
         eval_feat = compute_features(model, subgraphs, args.embedding_dim, device)
-        # projection
-        # features = torch.mm(features, transformer).numpy()
 
         # Kmeans
         cluster_result = clustering.run_kmeans(eval_feat, args)
-        # print(np.unique(cluster_result['nd2cluster'].numpy(), return_counts=True))
 
         eval_feat = torch.FloatTensor(eval_feat).detach()
         nd_lists = [[] for i in range(args.num_clusters)]  # (k, N_k)
@@ -152,7 +142,7 @@ def train():
             output = model(ba, bf, get_node=True) # (2*batch_size, d)
             output = output.view(2, -1, args.embedding_dim) # (2, batch_size, d)
             output = args.alpha * output[0] + (1-args.alpha) * output[1] # (batch_size, d)
-            output = proj(output)
+            # output = proj(output)
             score = output / args.temperature
             
             loss = criterion(score, cluster_result['nd2cluster'][idx])
@@ -230,26 +220,33 @@ def test():
             else:
                 idx = all_idx[batch_idx * batch_size:]
 
-            # cur_batch_size = len(idx)
+            cur_batch_size = len(idx)
             ba = []
             bf = []
 
+            added_adj_zero_row = torch.zeros((cur_batch_size, 1, subgraph_size)).to(device)
+            added_adj_zero_col = torch.zeros((cur_batch_size, subgraph_size + 1, 1)).to(device)
+            added_adj_zero_col[:, -1, :] = 1.
+            added_feat_zero_row = torch.zeros((cur_batch_size, 1, ft_size)).to(device)
+
             for i in idx:
                 cur_adj = adj[:, subgraphs[i], :][:, :, subgraphs[i]]
-                # (1, subg_size, ft_size)
                 cur_feat = features[:, subgraphs[i], :]
                 ba.append(cur_adj)
                 bf.append(cur_feat)
 
             ba = torch.cat(ba)
+            ba = torch.cat((ba, added_adj_zero_row), dim=1)
+            ba = torch.cat((ba, added_adj_zero_col), dim=2)
             bf = torch.cat(bf)
+            bf = torch.cat((bf[:, :-1, :], added_feat_zero_row, bf[:, -1:, :]), dim=1)
 
             # ===================forward=====================
             with torch.no_grad():
                 output = model(ba, bf, get_node=True)
                 output = output.view(2, -1, args.embedding_dim) # (2, batch_size, d)
                 output = args.alpha * output[0] + (1-args.alpha) * output[1] # (batch_size, d)
-                output = proj(output)
+                # output = proj(output)
                 score = output / args.temperature
                 pred = score.max(1)[1]  # (2*batch_size, )
                 pure_gau = score[torch.arange(score.shape[0]), pred].unsqueeze(dim=-1)
@@ -276,7 +273,7 @@ def compute_features(model, subgraphs, embedding_dim, device):
     """
     print('Computing features...', flush=True)
     model.eval()
-    proj.eval()
+    # proj.eval()
 
     all_feat = torch.zeros(nb_nodes, embedding_dim).to(device)
     with tqdm(total=batch_num) as pbar_eval:
@@ -288,17 +285,27 @@ def compute_features(model, subgraphs, embedding_dim, device):
             else:
                 idx = all_idx[batch_idx * batch_size:]
 
+            cur_batch_size = len(idx)
             ba = []
             bf = []
 
+            added_adj_zero_row = torch.zeros((cur_batch_size, 1, subgraph_size)).to(device)
+            added_adj_zero_col = torch.zeros((cur_batch_size, subgraph_size + 1, 1)).to(device)
+            added_adj_zero_col[:, -1, :] = 1.
+            added_feat_zero_row = torch.zeros((cur_batch_size, 1, ft_size)).to(device)
+
             for i in idx:
                 cur_adj = adj[:, subgraphs[i], :][:, :, subgraphs[i]]
-                cur_feat = features[:, subgraphs[i], :]  # (1, subg_size, ft_size)
+                cur_feat = features[:, subgraphs[i], :]
                 ba.append(cur_adj)
                 bf.append(cur_feat)
 
             ba = torch.cat(ba)
+            ba = torch.cat((ba, added_adj_zero_row), dim=1)
+            ba = torch.cat((ba, added_adj_zero_col), dim=2)
             bf = torch.cat(bf)
+            bf = torch.cat((bf[:, :-1, :], added_feat_zero_row, bf[:, -1:, :]), dim=1)
+        
             feat = model(ba, bf, get_node=True) # (2*batch_size, d)
             feat = feat.view(2, -1, embedding_dim) # (2, batch_size, d)
             feat = args.alpha * feat[0] + (1-args.alpha) * feat[1] # (batch_size, d)
@@ -403,11 +410,12 @@ if __name__ == '__main__':
     gnn_args = {
         'ft_size': ft_size,
         'output_dim': args.embedding_dim,
-        'gnn_model': args.model
+        'gnn_model': args.model,
+        'nmb_prototypes': args.num_clusters, 
     }
 
     model = GraphEncoder(**gnn_args)
-    proj = nn.Linear(args.embedding_dim, args.num_clusters)
+    # proj = nn.Linear(args.embedding_dim, args.num_clusters)
     
     # build optimizer
     if args.optimizer == "sgd":
