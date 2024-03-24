@@ -136,23 +136,6 @@ def preprocess_features(features):
     return features.todense()
 
 
-# def compute_ppr(graph: nx.Graph, alpha=0.2, self_loop=True):
-#     a = nx.convert_matrix.to_numpy_array(graph)
-#     if self_loop:
-#         a = a + np.eye(a.shape[0])                                
-#     d = np.diag(np.sum(a, 1))                                     
-#     dinv = fractional_matrix_power(d, -0.5)                       
-#     at = np.matmul(np.matmul(dinv, a), dinv)                      
-#     return alpha * inv((np.eye(a.shape[0]) - (1 - alpha) * at))
-
-# def compute_heat(graph: nx.Graph, t=5, self_loop=True):
-#     a = nx.convert_matrix.to_numpy_array(graph)
-#     if self_loop:
-#         a = a + np.eye(a.shape[0])
-#     d = np.diag(np.sum(a, 1))
-#     return np.exp(t * (np.matmul(a, inv(d)) - 1))
-
-
 def generate_rwr_subgraph(dgl_graph, subgraph_size):
     all_idx = list(range(dgl_graph.number_of_nodes()))
     reduced_size = subgraph_size - 1

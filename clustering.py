@@ -57,20 +57,6 @@ def get_Mahalanobis_score(x, n_clusters, centroids, precision):
 			gaussian_score = term_gau.view(-1,1) # (batch_size, 1)
 		else:
 			gaussian_score = torch.cat((gaussian_score, term_gau.view(-1,1)), 1) # (batch_size, k)
-	
-	# gaussian_score = F.normalize(gaussian_score, dim=-1)
-	# print(gaussian_score[:3])
-	# gaussian_score = normalize(gaussian_score)
-	# print(gaussian_score[:3])
-	# Input_processing
-	# pred = gaussian_score.min(1)[1] # (batch_size, )
-	# pure_gau = gaussian_score[torch.arange(gaussian_score.shape[0]), pred].unsqueeze(dim=-1)
-	# print(pure_gau[:3])
-	# batch_sample_mean = centroids.index_select(0, pred) # (batch_size, d)
-	# zero_f = x - batch_sample_mean # (batch_size, d)
-	# pure_gau = -0.5*torch.mm(torch.mm(zero_f, precision), zero_f.t()).diag()# (1, batch_size)
-	# print(pure_gau[:3])
-	# return pure_gau.squeeze(1)
 	return gaussian_score
 
 
@@ -128,7 +114,7 @@ def run_kmeans(x, args):
 		x: data to be clustered
 	"""
 	
-	print('performing kmeans clustering')
+	# print('performing kmeans clustering')
 	results = {'nd2cluster': None,'centroids': None,'density': None}
 	
 	# intialize faiss clustering parameters
@@ -233,23 +219,56 @@ def visualize(X, labels, ano_labels, savepath='./fig/cluster.png'):
 	
 	if savepath:
 		plt.savefig(savepath, dpi=300, bbox_inches='tight')
-	# plt.show()
 
-# def cluster_assign(nd_lists, dataset):
-#     """Creates a dataset from clustering, with clusters as labels.
-#     Args:
-#         images_lists (list of list): for each cluster, the list of image indexes
-#                                     belonging to this cluster
-#         dataset (list): initial dataset
-#     Returns:
-#         ReassignedDataset(torch.utils.data.Dataset): a dataset with clusters as
-#                                                      labels
-#     """
-#     assert nd_lists is not None
-#     pseudolabels = []
-#     nd_indices = []
-#     for cluster, nodes in enumerate(nd_lists): # (k, N_k)
-#         nd_indices.extend(nodes)
-#         pseudolabels.extend([cluster] * len(nodes))
 
-#     return ReassignedDataset(nd_indices, pseudolabels, dataset)
+def run_cbof(x, centroids, labels, mode):
+	large_clusters, _ = get_clusters(labels)
+	distances = []
+	for p, label in zip(x, labels):
+		if label in large_clusters:
+			center = centroids[label]
+			d = get_distance(p, center, mode)
+		else:
+			d = min([get_distance(p, center, mode) for center in centroids[large_clusters]])
+		distances.append(d)
+	return torch.cat(distances)
+
+
+def get_clusters(labels):
+	sizes = np.unique(labels.numpy(), return_counts=True)[1]
+	n_clusters = len(sizes)
+
+	large_clusters = []
+	small_clusters = []
+	count = 0
+	MAX_N_POINT_IN_LARGE_CLUSTER = 0.9 * sum(sizes)
+	BETA = 5
+
+	satisfy_alpha = False
+	satisfy_beta = False
+	for i in range(n_clusters):
+		if satisfy_alpha and satisfy_beta:
+			small_clusters.append(i)
+			continue
+	
+		count += sizes[i]
+		if count > MAX_N_POINT_IN_LARGE_CLUSTER:
+			satisfy_alpha = True
+
+		if i < n_clusters-1:
+			ratio = sizes[i] / sizes[i + 1]
+			if ratio > BETA:
+				satisfy_beta = True
+	
+		large_clusters.append(i)
+	return large_clusters, small_clusters
+
+
+def get_distance(a, b, mode='cos', precision=None):
+	diff = a-b
+	if mode == 'eu':
+		return torch.mm(diff, diff.T)
+	if mode == 'ma' and precision:
+		return torch.mm(torch.mm(diff, precision), diff.T).diag()
+	if mode == 'cos':
+		return torch.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0))
