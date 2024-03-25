@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import scipy.sparse as sp
 import torch.nn.functional as F
-from dgl.nn.pytorch import AvgPooling, Set2Set
+# from dgl.nn.pytorch import AvgPooling, Set2Set
 
 from models.gat import UnsupervisedGAT
 from models.gin import UnsupervisedGIN

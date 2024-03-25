@@ -50,7 +50,7 @@ def load_mat(dataset):
 
 
 def adj_to_dgl_graph(adj):
-    nx_graph = nx.from_scipy_sparse_array(adj)
+    nx_graph = nx.from_scipy_sparse_matrix(adj)
     dgl_graph = dgl.DGLGraph(nx_graph)
     return dgl_graph
 

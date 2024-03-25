@@ -96,16 +96,16 @@ def preprocess_features(npdata, pca=256):
 	return npdata
 
 
-def learn_metric(X, y):
-	from metric_learn import LMNN
+# def learn_metric(X, y):
+# 	from metric_learn import LMNN
 
-	lmnn = LMNN(n_neighbors=3, max_iter=2)
-	lmnn.fit(X, y)
+# 	lmnn = LMNN(n_neighbors=3, max_iter=2)
+# 	lmnn.fit(X, y)
 
-	# X_transformed = lmnn.transform(X)
-	W = lmnn.components_
+# 	# X_transformed = lmnn.transform(X)
+# 	W = lmnn.components_
 
-	return torch.tensor(W, dtype=torch.float32)
+# 	return torch.tensor(W, dtype=torch.float32)
 	
 
 def run_kmeans(x, args):
