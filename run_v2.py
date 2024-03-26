@@ -24,14 +24,14 @@ parser.add_argument('--seed', type=int, default=39)
 parser.add_argument('--workers', type=int, default=4)
 parser.add_argument('--device', type=str, default='cuda:0')
 # dataset
-parser.add_argument('--dataset', type=str, default='pubmed', 
+parser.add_argument('--dataset', type=str, default='acm', 
 					choices=["cora", "citeseer", "blogcatalog", 
 							 "flickr", "citation", "acm", "pubmed"])
 # cora 1e-3 0.9 7
 # citeseer 1e-3 0.9 5
 # blogcatalog 1e-3 0.9 9
 # flickr 1e-3 0.9 10
-# citation 
+# citation 0.8 5 
 # acm 1e-3 0.9 9 20
 # pubmed 1e-3 3 0.7403 0.9 0.7405 0.8 0.7701 0.7 less
 
@@ -43,23 +43,23 @@ parser.add_argument("--model", type=str, default="gcn",
 parser.add_argument('--nmb_prototypes', type=int, default=3)
 parser.add_argument('--num_clusters', type=int, default=3)
 # hyperparameters
-parser.add_argument('--epochs', type=int, default=8)
+parser.add_argument('--epochs', type=int, default=100)
 parser.add_argument('--warmup_epochs', type=int, default=1)
 parser.add_argument('--optimizer', type=str, default='adam')
 parser.add_argument('--sgd_momentum', type=float, default=0.9)
 parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--weight_decay', type=float, default=0.0)
+
 parser.add_argument('--embedding_dim', type=int, default=64)
 parser.add_argument('--subgraph_size', type=int, default=4)
 parser.add_argument('--batch_size', type=int, default=300)
+parser.add_argument('--test_rounds', type=int, default=100)
 # ratio
-parser.add_argument('--alpha', type=float, default=0.7)
-parser.add_argument('--negative_sample', type=int, default=3)
+parser.add_argument('--alpha', type=float, default=0.9)
 parser.add_argument('--temperature', type=float, default=1.0) # 0.6247 0.1 & 0.7020 0.2
 # print
 parser.add_argument('--print_freq', type=int, default=10)
 parser.add_argument('--print_cluster_freq', type=int, default=33)
-parser.add_argument('--test_rounds', type=int, default=10)
 
 parser.add_argument("--world_size", default=-1, type=int, help="""
 					number of processes: it is set automatically and
@@ -197,21 +197,69 @@ def test():
 
 	# switch to eval mode
 	model.eval()
+
+	subgraphs = generate_rwr_subgraph(dgl_graph, subgraph_size)
+	local_memory_embeddings = compute_features(model, subgraphs, args.embedding_dim, device) # (N, d)
+	# initialize prototypes for classification
+	_, _ = cluster_memory(model, local_memory_embeddings, nb_nodes)
 	
 	multi_round_ano_score = np.zeros((args.test_rounds, nb_nodes))
 	for round in range(args.test_rounds):
-		# all_idx = list(range(nb_nodes))
-		# random.shuffle(all_idx)
+		all_idx = list(range(nb_nodes))
+		random.shuffle(all_idx)
 		subgraphs = generate_rwr_subgraph(dgl_graph, subgraph_size)
-		local_memory_embeddings = compute_features(model, subgraphs, args.embedding_dim, device) # (N, d)
-		# initialize prototypes for classification
-		_, centroids = cluster_memory(model, local_memory_embeddings, nb_nodes)
-		score = local_memory_embeddings @ centroids.T
-		score = F.softmax(score / args.temperature, dim=1)
-		pred = score.max(1)[1]
-		pure_gau = score[torch.arange(score.shape[0]), pred].unsqueeze(dim=-1) # (batch_size, 1)
-		ano_score = -pure_gau.squeeze(1).cpu().numpy()
-		multi_round_ano_score[round] = ano_score
+		# local_memory_embeddings = compute_features(model, subgraphs, args.embedding_dim, device) # (N, d)
+		# # initialize prototypes for classification
+		# _, centroids = cluster_memory(model, local_memory_embeddings, nb_nodes)
+		# score = local_memory_embeddings @ centroids.T
+		# score = F.softmax(score / args.temperature, dim=1)
+		# pred = score.max(1)[1]
+		# pure_gau = score[torch.arange(score.shape[0]), pred].unsqueeze(dim=-1) # (batch_size, 1)
+		# ano_score = -pure_gau.squeeze(1).cpu().numpy()
+		# multi_round_ano_score[round] = ano_score
+
+		for batch_idx in range(batch_num):
+
+			is_final_batch = (batch_idx == (batch_num - 1))
+			if not is_final_batch:
+				idx = all_idx[batch_idx *
+							  batch_size: (batch_idx + 1) * batch_size]
+			else:
+				idx = all_idx[batch_idx * batch_size:]
+
+			cur_batch_size = len(idx)
+			ba = []
+			bf = []
+
+			added_adj_zero_row = torch.zeros((cur_batch_size, 1, subgraph_size)).to(device)
+			added_adj_zero_col = torch.zeros((cur_batch_size, subgraph_size + 1, 1)).to(device)
+			added_adj_zero_col[:, -1, :] = 1.
+			added_feat_zero_row = torch.zeros((cur_batch_size, 1, ft_size)).to(device)
+
+			for i in idx:
+				cur_adj = adj[:, subgraphs[i], :][:, :, subgraphs[i]]
+				# (1, subg_size, ft_size)
+				cur_feat = features[:, subgraphs[i], :]
+				ba.append(cur_adj)
+				bf.append(cur_feat)
+
+			ba = torch.cat(ba)
+			ba = torch.cat((ba, added_adj_zero_row), dim=1)
+			ba = torch.cat((ba, added_adj_zero_col), dim=2)
+			bf = torch.cat(bf)
+			bf = torch.cat((bf[:, :-1, :], added_feat_zero_row, bf[:, -1:, :]), dim=1)
+
+			# ===================forward=====================
+			with torch.no_grad():
+				output = model(ba, bf)[1]
+				# score = F.softmax(output / args.temperature, dim=1)
+				score = output / args.temperature
+				pred = score.max(1)[1]
+				pure_gau = score[torch.arange(score.shape[0]), pred].unsqueeze(dim=-1) # (batch_size, 1)
+				ano_score = -pure_gau.squeeze(1).cpu().numpy()
+
+			multi_round_ano_score[round, idx] = ano_score
+
 
 	ano_score_final = np.mean(multi_round_ano_score,
 							  axis=0) + np.std(multi_round_ano_score, axis=0)
@@ -386,6 +434,7 @@ if __name__ == '__main__':
 	print('k: {}'.format(args.num_clusters), flush=True)
 	print('lr: {}'.format(args.lr), flush=True)
 	print('ratio: {}'.format(args.alpha), flush=True)
+	print('embedding_dim: {}'.format(args.embedding_dim), flush=True)
 	device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
 
 	random.seed(args.seed)
