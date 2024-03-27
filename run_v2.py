@@ -17,7 +17,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.metrics.cluster import normalized_mutual_info_score
 
 # from torch.utils.tensorboard import SummaryWriter
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE" # for macbook
 
 parser = argparse.ArgumentParser(description='')
 parser.add_argument('--seed', type=int, default=39)
@@ -27,40 +27,27 @@ parser.add_argument('--device', type=str, default='cuda:0')
 parser.add_argument('--dataset', type=str, default='acm', 
 					choices=["cora", "citeseer", "blogcatalog", 
 							 "flickr", "citation", "acm", "pubmed"])
-# cora 1e-3 0.9 7
-# citeseer 1e-3 0.9 5
-# blogcatalog 1e-3 0.9 9
-# flickr 1e-3 0.9 10
-# citation 0.8 5 
-# acm 1e-3 0.9 9 20
-# pubmed 1e-3 3 0.7403 0.9 0.7405 0.8 0.7701 0.7 less
-
-
 # model definition
 parser.add_argument("--model", type=str, default="gcn",
 					choices=["gat", "mpnn", "gin", "gcn"])
 # num of clusters
-parser.add_argument('--nmb_prototypes', type=int, default=3)
-parser.add_argument('--num_clusters', type=int, default=3)
+parser.add_argument('--nmb_prototypes', type=int, default=9)
+parser.add_argument('--num_clusters', type=int, default=9)
 # hyperparameters
 parser.add_argument('--epochs', type=int, default=100)
-parser.add_argument('--warmup_epochs', type=int, default=1)
 parser.add_argument('--optimizer', type=str, default='adam')
-parser.add_argument('--sgd_momentum', type=float, default=0.9)
 parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--weight_decay', type=float, default=0.0)
-
-parser.add_argument('--embedding_dim', type=int, default=64)
+# model parameters
+parser.add_argument('--embedding_dim', type=int, default=512)
 parser.add_argument('--subgraph_size', type=int, default=4)
 parser.add_argument('--batch_size', type=int, default=300)
 parser.add_argument('--test_rounds', type=int, default=100)
 # ratio
 parser.add_argument('--alpha', type=float, default=0.9)
-parser.add_argument('--temperature', type=float, default=1.0) # 0.6247 0.1 & 0.7020 0.2
+parser.add_argument('--temperature', type=float, default=1.0)
 # print
 parser.add_argument('--print_freq', type=int, default=10)
-parser.add_argument('--print_cluster_freq', type=int, default=33)
-
 parser.add_argument("--world_size", default=-1, type=int, help="""
 					number of processes: it is set automatically and
 					should not be passed as argument""")
@@ -71,8 +58,8 @@ args = parser.parse_args()
 
 def train():
 	# training
-	global best, best_t, cnt_wait
-	for epoch in range(args.epochs):
+	global best, best_t, cnt_wait, pre_assignments, nmis
+	for epoch in range(args.epochs+1):
 		# print("==> training...")
 		total_loss = 0.
 		subgraphs = generate_rwr_subgraph(dgl_graph, subgraph_size)
@@ -81,14 +68,16 @@ def train():
 		# get features from frozen encoder
 		local_memory_embeddings = compute_features(model, subgraphs, args.embedding_dim, device)
 		assignments, _ = cluster_memory(model, local_memory_embeddings, nb_nodes)
-		# print('Clustering for epoch {} done.'.format(epoch))
+		
+		# calculate NMI between epochs
+		cur_assignments = assignments.cpu().numpy()
+		if pre_assignments is not None:
+			nmi = normalized_mutual_info_score(cur_assignments, pre_assignments)
+			nmis.append(nmi)
+		pre_assignments = cur_assignments
 
-		# nmi = normalized_mutual_info_score(labels_true=A, labels_pred=B)
-
-		# cluster visualization
-		# if epoch % args.print_cluster_freq == 0:
-		#     clustering.visualize(local_memory_embeddings, assignments, ano_labels, 
-		#                          savepath='./fig/' + f'cluster_{epoch}.png')
+		if epoch == args.epochs:
+			break
 
 		# train for one epoch
 		batch_time = AverageMeter('Time', ':6.3f')
@@ -150,8 +139,6 @@ def train():
 			emb = emb.detach()
 
 			# calculate score
-			# output = output.view(2, -1, args.num_clusters) # (2, batch_size, K)
-			# output = args.alpha * output[0] + (1-args.alpha) * output[1]
 			score = output / args.temperature
 			
 			loss = criterion(score, assignments[idx])
@@ -170,8 +157,6 @@ def train():
 			# scaler.update()
 
 			# ============ update memory banks ... ============
-			# emb = emb.view(2, -1, args.embedding_dim)
-			# emb = args.alpha * emb[0] + (1-args.alpha) * emb[1]
 			local_memory_embeddings[idx] = emb
 
 			losses.update(loss.item(), cur_batch_size)
@@ -238,7 +223,6 @@ def test():
 
 			for i in idx:
 				cur_adj = adj[:, subgraphs[i], :][:, :, subgraphs[i]]
-				# (1, subg_size, ft_size)
 				cur_feat = features[:, subgraphs[i], :]
 				ba.append(cur_adj)
 				bf.append(cur_feat)
@@ -261,8 +245,7 @@ def test():
 			multi_round_ano_score[round, idx] = ano_score
 
 
-	ano_score_final = np.mean(multi_round_ano_score,
-							  axis=0) + np.std(multi_round_ano_score, axis=0)
+	ano_score_final = np.mean(multi_round_ano_score, axis=0) + np.std(multi_round_ano_score, axis=0)
 	auc = roc_auc_score(ano_labels, ano_score_final)
 	# all_auc.append(auc)
 	print('Testing AUC:{:.4f}'.format(auc), flush=True)
@@ -309,9 +292,7 @@ def compute_features(model, subgraphs, embedding_dim, device):
 		bf = torch.cat(bf)
 		bf = torch.cat((bf[:, :-1, :], added_feat_zero_row, bf[:, -1:, :]), dim=1)
 
-		feat = model(ba, bf)[0] # (2*batch_size, d)
-		# feat = feat.view(2, -1, embedding_dim)
-		# feat = args.alpha * feat[0] + (1-args.alpha) * feat[1] # (batch_size, d)
+		feat = model(ba, bf)[0]
 		all_feat[idx] = feat
 			# pbar_eval.update(1)
 	return all_feat.detach()
@@ -488,7 +469,7 @@ if __name__ == '__main__':
 		optimizer = torch.optim.SGD(
 			model.parameters(),
 			lr=args.lr,
-			momentum=args.sgd_momentum,
+			momentum=0.9,
 			weight_decay=args.weight_decay,
 		)
 	elif args.optimizer == "adam":
@@ -513,5 +494,14 @@ if __name__ == '__main__':
 	# iteration length
 	batch_num = nb_nodes // batch_size + 1
 
+	# store NMI
+	pre_assignments = None
+	nmis = []
+
+	end = time.time()
 	train()
 	test()
+	print('Total Time: {0:.0f} s'.format(time.time() - end))
+
+	# with 
+	# print(nmis)

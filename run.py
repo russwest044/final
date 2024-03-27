@@ -22,7 +22,7 @@ parser.add_argument('--seed', type=int, default=1)
 parser.add_argument('--workers', type=int, default=4)
 parser.add_argument('--device', type=str, default='cuda:0')
 # dataset
-parser.add_argument('--dataset', type=str, default='pubmed', 
+parser.add_argument('--dataset', type=str, default='citeseer', 
 					choices=["cora", "citeseer", "blogcatalog", 
 							 "flickr", "citation", "acm", "pubmed"])
 
@@ -38,9 +38,9 @@ parser.add_argument('--dataset', type=str, default='pubmed',
 parser.add_argument("--model", type=str, default="gcn",
 					choices=["gat", "mpnn", "gin", "gcn"])
 # num of clusters
-parser.add_argument('--num_clusters', type=int, default=3)
+parser.add_argument('--num_clusters', type=int, default=9)
 # hyperparameters
-parser.add_argument('--epochs', type=int, default=5)
+parser.add_argument('--epochs', type=int, default=100)
 parser.add_argument('--warmup_epochs', type=int, default=1)
 parser.add_argument('--optimizer', type=str, default='adam')
 parser.add_argument('--sgd_momentum', type=float, default=0.9)
@@ -54,7 +54,7 @@ parser.add_argument('--temperature', type=float, default=1.0)
 # print parameters
 parser.add_argument('--print_freq', type=int, default=10)
 parser.add_argument('--print_cluster_freq', type=int, default=33)
-parser.add_argument('--test_rounds', type=int, default=10)
+parser.add_argument('--test_rounds', type=int, default=100)
 
 args = parser.parse_args()
 
