@@ -24,7 +24,7 @@ parser.add_argument('--seed', type=int, default=39)
 parser.add_argument('--workers', type=int, default=4)
 parser.add_argument('--device', type=str, default='cuda:0')
 # dataset
-parser.add_argument('--dataset', type=str, default='acm', 
+parser.add_argument('--dataset', type=str, default='cora', 
 					choices=["cora", "citeseer", "blogcatalog", 
 							 "flickr", "citation", "acm", "pubmed"])
 # model definition
@@ -39,7 +39,7 @@ parser.add_argument('--optimizer', type=str, default='adam')
 parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--weight_decay', type=float, default=0.0)
 # model parameters
-parser.add_argument('--embedding_dim', type=int, default=512)
+parser.add_argument('--embedding_dim', type=int, default=64)
 parser.add_argument('--subgraph_size', type=int, default=4)
 parser.add_argument('--batch_size', type=int, default=300)
 parser.add_argument('--test_rounds', type=int, default=100)

@@ -8,6 +8,7 @@ class GCN(nn.Module):
 		super(GCN, self).__init__()
 		self.fc = nn.Linear(in_ft, out_ft, bias=False)
 		self.act = nn.PReLU() if act == 'prelu' else act
+		self.dropout = nn.Dropout(0.2)
 		
 		if bias:
 			self.bias = nn.Parameter(torch.FloatTensor(out_ft))
@@ -143,7 +144,7 @@ class Patch_Discriminator(nn.Module):
 
 class Model(nn.Module):
 
-	def __init__(self, n_in, n_h, activation='prelu', nmb_prototypes=0, readout='avg', alpha=1.0):
+	def __init__(self, n_in, n_h, activation='prelu', nmb_prototypes=0, readout='min', alpha=1.0):
 		super(Model, self).__init__()
 
 		self.alpha = alpha
@@ -185,6 +186,7 @@ class Model(nn.Module):
 			# h_ano = h_2[:, -2, :]
 		
 		out = self.alpha * c + (1-self.alpha) * h_mv
+		# out = self.read(h_1)
 
 		if self.prototypes is not None:
 			return out, self.prototypes(out)
